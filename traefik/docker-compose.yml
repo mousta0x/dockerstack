@@ -1,0 +1,232 @@
+---
+version: "3.9"
+
+networks:
+  default:
+    name: main-net
+    external: true
+  media-net:
+    name: media-net
+    external: true
+  appwrite-net:
+    name: appwrite-net
+    external: true
+  messaging-net:
+    name: messaging-net
+    external: true
+  infra-net:
+    name: infra-net
+    external: true
+  devops-net:
+    name: devops-net
+    external: true
+  tools-net:
+    name: tools-net
+    external: true
+  docker-socket-proxy-net:
+    external: true
+    name: docker-socket-proxy-net
+  productivity-net:
+    external: true
+    name: productivity-net
+  standardnotes-net:
+    external: true
+    name: standardnotes-net
+
+volumes:
+  authelia-redis-data:
+
+x-env: &default-tz-puid-pgid
+  TZ: Etc/UTC
+  PUID: 1000
+  PGID: 1000
+
+x-defaults: &service-defaults
+  networks:
+    - default
+  security_opt:
+    - no-new-privileges:true
+  restart: unless-stopped
+
+x-net: &traefik-networks
+  media-net:
+    ipv4_address: 172.18.0.200
+  default:
+    ipv4_address: 172.20.0.200
+  appwrite-net:
+    ipv4_address: 172.22.0.200
+  infra-net:
+    ipv4_address: 172.24.0.200
+  devops-net:
+    ipv4_address: 172.26.0.200
+  tools-net:
+    ipv4_address: 172.27.0.200
+  standardnotes-net:
+    ipv4_address: 172.28.0.200
+  productivity-net:
+    ipv4_address: 172.29.0.200
+  messaging-net:
+    ipv4_address: 172.30.0.200
+  docker-socket-proxy-net:
+    ipv4_address: 172.31.0.200
+
+services:
+
+  traefik:
+    <<: *service-defaults
+    image: traefik:${TRAEFIK_IMAGE_TAG:-v3.0}
+    container_name: traefik
+    depends_on:
+      - docker-socket-proxy
+      - authelia
+    networks:
+      <<: *traefik-networks
+    command:
+      - "--configFile=/shared/traefik.yml"
+    ports:
+      - 80:80
+      - 443:443
+      - 222:222
+      - 2022:2022
+      - 2002:2002
+    environment:
+      CF_DNS_API_TOKEN: ${TRAEFIK_CF_DNS_API_TOKEN} #all_zones
+      CLOUDFLARE_TTL: 120
+      CLOUDFLARE_HTTP_TIMEOUT: 30
+      CLOUDFLARE_POLLING_INTERVAL: 2
+      CLOUDFLARE_PROPAGATION_TIMEOUT: 120
+      GCORE_PERMANENT_API_TOKEN: ${TRAEFIK_GCORE_PERMANENT_API_TOKEN}
+    volumes:
+      - ${APPDATA_DIR}/traefik:/shared
+      - ${LOGS_DIR}/traefik:/log
+      - ${CERTS_DIR}/traefik:/certs:ro
+    logging:
+      driver: "syslog"
+      options:
+        syslog-address: "udp://optimus.hzcloud:54000"
+        syslog-facility: "daemon"
+        syslog-format: "rfc5424"
+        tag: "traefik"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.api.rule=Host(`traefik.${CLOUD_HOST}`)"
+      - "traefik.http.routers.api.service=api@internal"
+      - "traefik.http.routers.api.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.api.tls.domains[0].main=traefik.${CLOUD_HOST}"
+      - "traefik.http.routers.api.tls.domains[0].sans=*.${CLOUD_HOST}"
+      - "traefik.http.routers.api.middlewares=authelia@file"
+
+  # hub-agent:
+  #   image: ghcr.io/traefik/hub-agent-traefik:${TRAEFIK_HUB_IMAGE_TAG:-latest}
+  #   pull_policy: always
+  #   container_name: hub-agent
+  #   command:
+  #     - run
+  #     - --hub.token=${TRAEFIK_HUB_TOKEN}
+  #     - --auth-server.advertise-url=http://hub-agent
+  #     - --traefik.host=traefik
+  #     - --traefik.tls.insecure=true
+  #     - --traefik.docker.endpoint=tcp://docker-socket-proxy:2375
+  #   networks:
+  #     - docker-socket-proxy-net
+  #   depends_on:
+  #     - traefik
+
+  authelia:
+    <<: *service-defaults
+    image: authelia/authelia:${AUTHELIA_IMAGE_TAG:-4.37}
+    container_name: authelia
+    volumes:
+      - ${APPDATA_DIR}/authelia:/config
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.authelia.rule=Host(`auth.${CLOUD_HOST}`)"
+      - "traefik.http.routers.authelia.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.authelia.tls.domains[0].main=${CLOUD_HOST}"
+      - "traefik.http.routers.authelia.tls.domains[0].sans=*.${CLOUD_HOST}"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "1m"
+
+  authelia-redis:
+    <<: *service-defaults
+    image: redis:${AUTHELIA_REDIS_IMAGE_TAG:-7-alpine}
+    container_name: authelia-redis
+    command: redis-server --requirepass ${AUTHELIA_REDIS_PASS}
+    volumes:
+      - authelia-redis-data:/data
+
+  #  authelia-db:
+  #     image: ${AUTHELIA_DB_IMAGE:-mariadb:10.7}
+  #     container_name: authelia-db
+  #     command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci --explicit_defaults_for_timestamp=1
+  #     environment:
+  #       MYSQL_DATABASE: authelia
+  #       MYSQL_USER: authelia
+  #       MYSQL_PASSWORD: ${AUTHELIA_MYSQL_PASSWORD}
+  #       MYSQL_ROOT_PASSWORD: ${AUTHELIA_MYSQL_ROOT_PASSWORD}
+  #     ports:
+  #       - 6906:3306
+  #     volumes:
+  #       - ${APPDATA_DIR}/authelia/db:/var/lib/mysql
+
+  #-----------------------------------------------------------------------------------------
+
+  traefik-nginx-worker:
+    <<: *service-defaults
+    image: nginx
+    container_name: traefik-nginx-worker
+    volumes:
+      - ${APPDATA_DIR}/traefik/nginx-worker/conf:/etc/nginx/conf.d
+      - ${APPDATA_DIR}/traefik/nginx-worker/static:/var/www/html:ro
+      - ${LOGS_DIR}/traefik-nginx:/var/log/nginx
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.services.traefik-nginx-worker.loadbalancer.server.port=80"
+
+  traefik-certs-dumper:
+    <<: *service-defaults
+    image: ldez/traefik-certs-dumper:v2.8.1
+    container_name: traefik-certs-dumper
+    entrypoint: sh -c 'apk add jq ; while ! [ -e /acme/acme.json ] || ! [ `jq ".[] | .Certificates | length" /acme/acme.json` != 0 ]; do sleep 1 ; done && traefik-certs-dumper file --version v2 --watch --source /acme/acme.json --dest /certs'
+    volumes:
+      - ${APPDATA_DIR}/traefik/certs:/certs
+      - ${APPDATA_DIR}/traefik/acme:/acme:ro
+
+  #-----------------------------------------------------------------------------------------
+
+  docker-socket-proxy:
+    <<: *service-defaults
+    image: tecnativa/docker-socket-proxy:${DOCKER_SOCKET_PROXY_IMAGE_TAG:-latest}
+    container_name: docker-socket-proxy
+    networks:
+      - docker-socket-proxy-net
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      CONTAINERS: 1
+      SERVICES: 1
+      NETWORKS: 1
+      TASKS: 1
+
+#-----------------------------------------------------------------------------------------
+
+# frpc:
+#   image: registry.${CLOUD_HOST}/frpc:v0.45.0
+#   container_name: frpc
+#   volumes:
+#     - ${APPDATA_DIR}/frpc:/config
+#     - ${CERTS_DIR}/optimus.hzcloud:/certs:ro
+#   command:
+#     - '--config=/config/frpc.ini'
+
+#   labels:
+#     - 'traefik.enable=true'
+#     - 'traefik.http.routers.frpc.rule=Host(`frpc.${CLOUD_HOST}`)'
+#     - 'traefik.http.routers.frpc.entrypoints=https'
+#     - 'traefik.http.routers.frpc.tls.certresolver=letsencrypt'
+#     - 'traefik.http.services.frpc.loadbalancer.server.port=7400'
+#     - 'traefik.http.routers.frpc.middlewares=authelia@file'
+
+#-----------------------------------------------------------------------------------------

@@ -1,0 +1,96 @@
+---
+version: "3.9"
+
+networks:
+  default:
+    name: tools-net
+    external: true
+  docker-socket-proxy-net:
+    name: docker-socket-proxy-net
+    external: true
+
+x-env: &default-tz-puid-pgid
+  TZ: Etc/UTC
+  PUID: 1000
+  PGID: 1000
+
+x-defaults: &service-defaults
+  networks:
+    - default
+  security_opt:
+    - no-new-privileges:true
+  restart: unless-stopped
+
+services:
+
+  watchtower:
+    <<: *service-defaults
+    image: containrrr/watchtower:${WATCHTOWER_IMAGE_TAG:-latest}
+    container_name: watchtower
+    environment:
+      - WATCHTOWER_POLL_INTERVAL=3600
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_DEBUG=false
+      - WATCHTOWER_LABEL_ENABLE=true
+      - WATCHTOWER_TIMEOUT=30s
+      - DOCKER_HOST=tcp://docker-socket-proxy:2375
+      - TZ=Etc/UTC
+    networks:
+      - docker-socket-proxy-net
+
+  autoheal:
+    <<: *service-defaults
+    image: registry.${CLOUD_HOST}/autoheal-dev:${AUTOHEAL_IMAGE_TAG:-22.10}
+    container_name: autoheal
+    environment:
+      - AUTOHEAL_CONTAINER_LABEL=all
+      - AUTOHEAL_INTERVAL=10
+      - AUTOHEAL_DEFAULT_STOP_TIMEOUT=20 # override with label:autoheal.stop.timeout=30
+      - DOCKER_SOCK=tcp://docker-socket-proxy:2375
+      - WEBHOOK_URL=${AUTOHEAL_WEBHOOK_URL}
+    networks:
+      - docker-socket-proxy-net
+
+  borgmatic-asgard:
+    <<: *service-defaults
+    image: b3vis/borgmatic:${BORGMATIC_IMAGE_TAG:-latest}
+    container_name: borgmatic-asgard
+    volumes:
+      - /mnt/asgard-root:/mnt/asgard:ro # backup source
+      - /mnt/data/borgrepo:/mnt/borgrepo-gdrive # backup dest
+      - ${APPDATA_DIR}/borgmatic-asgard/config:/etc/borgmatic.d # borgmatic config file(s) + crontab.txt
+      - ${APPDATA_DIR}/borgmatic-asgard/state:/root/.borgmatic # borgmatic state files
+      - ${APPDATA_DIR}/borgmatic-asgard/borg:/root/.config/borg # config and keyfiles
+      - ${APPDATA_DIR}/borgmatic-asgard/ssh:/root/.ssh # ssh key for remote repositories
+    tmpfs:
+      - /root/.cache/borg # checksums used for deduplication
+    healthcheck:
+      test: ls /mnt/borgrepo-gdrive/.mount /mnt/asgard/.mount &>/dev/null && true || false
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    environment:
+      - TZ=Etc/UTC
+      - BORG_PASSPHRASE=${BORG_PASSPHRASE_ASGARD}
+
+  borgmatic-optimus:
+    <<: *service-defaults
+    image: b3vis/borgmatic:${BORGMATIC_IMAGE_TAG:-latest}
+    container_name: borgmatic-optimus
+    volumes:
+      - ${APPDATA_DIR}:/mnt/appdata:ro # backup source
+      - /mnt/data/borgrepo:/mnt/borgrepo-gdrive # backup dest
+      - ${APPDATA_DIR}/borgmatic-optimus/config:/etc/borgmatic.d # borgmatic config file(s) + crontab.txt
+      - ${APPDATA_DIR}/borgmatic-optimus/state:/root/.borgmatic # borgmatic state files
+      - ${APPDATA_DIR}/borgmatic-optimus/borg:/root/.config/borg # config and keyfiles
+      - ${APPDATA_DIR}/borgmatic-optimus/ssh:/root/.ssh # ssh key for remote repositories
+    tmpfs:
+      - /root/.cache/borg # checksums used for deduplication
+    healthcheck:
+      test: ls /mnt/borgrepo-gdrive/.mount &>/dev/null && true || false
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    environment:
+      - TZ=Etc/UTC
+      - BORG_PASSPHRASE=${BORG_PASSPHRASE_OPTIMUS}

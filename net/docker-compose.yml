@@ -1,0 +1,75 @@
+---
+version: "3.9"
+
+networks:
+  tor-net:
+    external: true
+    name: tor-net
+  proxy-net:
+    external: true
+    name: proxy-net
+
+x-defaults: &service-defaults
+  networks:
+    - default
+  security_opt:
+    - no-new-privileges:true
+  restart: unless-stopped
+
+services:
+
+  tor:
+    <<: *service-defaults
+    image: goldy/tor-hidden-service:${TOR_IMAGE_TAG:-latest}
+    container_name: tor-hidden-service
+    environment:
+      INVIDIOUS_TOR_SERVICE_HOSTS: 80:invidious:3000
+      INVIDIOUS_TOR_SERVICE_VERSION: "3"
+      SEARX_TOR_SERVICE_HOSTS: 80:searxng:7070
+      SEARX_TOR_SERVICE_VERSION: "3"
+      TOR_ENABLE_VANGUARDS: "false"
+      VANGUARDS_EXTRA_OPTIONS: |
+        [Global]
+          enable_cbtverify = True
+          loglevel = INFO
+    volumes:
+      - ${APPDATA_DIR}/torkeys:/var/lib/tor/hidden_service/
+    networks:
+      - tor-net
+
+  tor-privoxy:
+    <<: *service-defaults
+    image: registry.${CLOUD_HOST}/tor-privoxy:${TOR_PRIVOXY_IMAGE_TAG:-22.08}
+    container_name: tor-privoxy
+    environment:
+      - TZ=Etc/UTC
+    ports:
+      - 1188:8118
+      - 9050:9050
+    networks:
+      - tor-net
+
+  gluetun-proton:
+    <<: *service-defaults
+    image: qmcgaw/gluetun:${GLUETUN_IMAGE_TAG:-latest}
+    container_name: gluetun-proton
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - VPN_SERVICE_PROVIDER=protonvpn
+      - OPENVPN_USER=${PROTON_OPENVPN_USER}
+      - OPENVPN_PASSWORD=${PROTON_OPENVPN_PASSWORD}
+      - SERVER_COUNTRIES=Switzerland
+      - HTTPPROXY=on
+      - HTTPPROXY_LOG=on
+      - DOT=off
+      - FIREWALL=off
+      - SHADOWSOCKS=off
+      - SHADOWSOCKS_PASSWORD=${PROTON_SHADOWSOCKS_PASSWORD}
+      - SHADOWSOCKS_LOG=off
+    #ports:
+    #  - 8888:8888
+    networks:
+      proxy-net:
+      #macvlan-net:
+      #  ipv4_address: 192.168.1.228

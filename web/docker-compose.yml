@@ -1,0 +1,240 @@
+---
+version: "3.9"
+
+networks:
+  default:
+    name: main-net
+    external: true
+
+volumes:
+  kutt_redis_data:
+
+x-env: &ghost-mysql-creds
+  MYSQL_DATABASE: ${GHOST_MYSQL_DATABASE}
+  MYSQL_USER: ${GHOST_MYSQL_USER}
+  MYSQL_PASSWORD: ${GHOST_MYSQL_PASSWORD}
+
+x-defaults: &service-defaults
+  networks:
+    - default
+  security_opt:
+    - no-new-privileges:true
+  restart: unless-stopped
+
+services:
+  # -------------------------------------------------------- GHOST --------------------------------------------------------
+
+  ghost:
+    <<: *service-defaults
+    image: ghost:${GHOST_IMAGE_TAG:-5}
+    container_name: ghost
+    environment:
+      <<: *ghost-mysql-creds
+      NODE_ENV: production
+    volumes:
+      - ${APPDATA_DIR}/ghost/content:/var/lib/ghost/content
+      - ${APPDATA_DIR}/ghost/config.production.json:/var/lib/ghost/config.production.json:ro
+    depends_on:
+      - ghost-db
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.ghost.rule=Host(`blog.${BASE_DOMAIN}`)"
+      - "traefik.http.routers.ghost.tls.certresolver=letsencrypt"
+      - "traefik.http.services.ghost.loadbalancer.server.port=3001"
+      - "traefik.http.routers.ghost-mousta-www.rule=Host(`${MOUSTA_DOMAIN}`)"
+      - "traefik.http.routers.ghost-mousta-www.tls.certresolver=letsencrypt-http"
+      - "traefik.http.routers.ghost-mousta-www.tls.domains[0].main=${MOUSTA_DOMAIN}"
+      - "traefik.http.routers.ghost-mousta-www.service=ghost@docker"
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  ghost-db:
+    <<: *service-defaults
+    image: ${GHOST_DB_IMAGE:-mysql:8-oracle}
+    container_name: ghost-db
+    environment:
+      <<: *ghost-mysql-creds
+      MYSQL_ROOT_PASSWORD: ${GHOST_MYSQL_ROOT_PASSWORD}
+    volumes:
+      - ${APPDATA_DIR}/ghost/db:/var/lib/mysql
+
+  # -------------------------------------------------------- MATOMO --------------------------------------------------------
+
+  matomo-app:
+    <<: *service-defaults
+    image: matomo:fpm-alpine
+    container_name: matomo-app
+    volumes:
+      - ${APPDATA_DIR}/matomo/site:/var/www/html
+    environment:
+      - MATOMO_DATABASE_HOST=matomo-db
+      - MATOMO_DATABASE_ADAPTER=mysql
+      - MATOMO_DATABASE_TABLES_PREFIX=matomo_
+      - MATOMO_DATABASE_DBNAME=${MATOMO_DATABASE_DBNAME}
+      - MATOMO_DATABASE_USERNAME=${MATOMO_DATABASE_USERNAME}
+      - MATOMO_DATABASE_PASSWORD=${MATOMO_DATABASE_PASSWORD}
+      - PHP_MEMORY_LIMIT=2048M
+
+  matomo-web:
+    <<: *service-defaults
+    image: nginx:alpine
+    container_name: matomo-web
+    volumes:
+      - ${APPDATA_DIR}/matomo/site:/var/www/html:ro
+      - ${APPDATA_DIR}/matomo/matomo.conf:/etc/nginx/conf.d/default.conf:ro
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.matomo.rule=Host(`stats.${CLOUD_HOST}`)"
+      - "traefik.http.routers.matomo.tls.certresolver=letsencrypt"
+      - "traefik.http.services.matomo.loadbalancer.server.port=80"
+      - "traefik.http.routers.matomo.middlewares=matomo-1@file"
+
+  matomo-db:
+    <<: *service-defaults
+    image: mariadb:10
+    container_name: matomo-db
+    command: --max-allowed-packet=64MB
+    volumes:
+      - ${APPDATA_DIR}/matomo/db:/var/lib/mysql
+    environment:
+      - MYSQL_DATABASE=${MATOMO_DATABASE_DBNAME}
+      - MYSQL_USER=${MATOMO_DATABASE_USERNAME}
+      - MYSQL_PASSWORD=${MATOMO_DATABASE_PASSWORD}
+      - MYSQL_ROOT_PASSWORD=${MATOMO_DATABASE_ROOT_PASSWORD}
+
+  # -------------------------------------------------------- KUTT --------------------------------------------------------
+
+  kutt:
+    <<: *service-defaults
+    image: kutt/kutt:${KUTT_IMAGE_TAG:-latest}
+    container_name: kutt
+    depends_on:
+      - kutt-db
+      - kutt-redis
+    command: ["./wait-for-it.sh", "kutt-db:5432", "--", "npm", "start"]
+    environment:
+      DB_HOST: kutt-db
+      DB_NAME: ${KUTT_DB_NAME}
+      DB_USER: ${KUTT_DB_USER}
+      DB_PASSWORD: ${KUTT_DB_PASSWORD}
+      REDIS_HOST: kutt-redis
+      PORT: 3000
+      SITE_NAME: Kutt
+      DEFAULT_DOMAIN: kutt.${CLOUD_HOST}
+      LINK_LENGTH: 6
+      NEO4J_DB_URI: bolt://localhost
+      NEO4J_DB_USERNAME: neo4j
+      NEO4J_DB_PASSWORD: ${KUTT_NEO4J_DB_PASSWORD}
+      DISALLOW_REGISTRATION: "false"
+      DISALLOW_ANONYMOUS_LINKS: "false"
+      USER_LIMIT_PER_DAY: 50
+      NON_USER_COOLDOWN: 5
+      DEFAULT_MAX_STATS_PER_LINK: 5000
+      CUSTOM_DOMAIN_USE_HTTPS: "false"
+      JWT_SECRET: ${KUTT_JWT_SECRET}
+      ADMIN_EMAILS: ${KUTT_ADMIN_EMAILS}
+      RECAPTCHA_SITE_KEY: ${KUTT_RECAPTCHA_SITE_KEY}
+      RECAPTCHA_SECRET_KEY: ${KUTT_RECAPTCHA_SECRET_KEY}
+      GOOGLE_SAFE_BROWSING_KEY: ${KUTT_GOOGLE_SAFE_BROWSING_KEY}
+      MAIL_HOST: ${KUTT_MAIL_HOST}
+      MAIL_PORT: ${KUTT_MAIL_PORT}
+      MAIL_SECURE: ${KUTT_MAIL_SECURE}
+      MAIL_USER: ${KUTT_MAIL_USER}
+      MAIL_PASSWORD: ${KUTT_MAIL_PASSWORD}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.kutt.rule=Host(`kutt.${CLOUD_HOST}`)"
+      - "traefik.http.routers.kutt.tls.certresolver=letsencrypt"
+      - "traefik.http.services.kutt.loadbalancer.server.port=3000"
+
+  kutt-redis:
+    <<: *service-defaults
+    image: redis:6.0-alpine
+    container_name: kutt-redis
+    volumes:
+      - kutt_redis_data:/data
+
+  kutt-db:
+    <<: *service-defaults
+    image: postgres:12-alpine
+    container_name: kutt-db
+    environment:
+      POSTGRES_DB: ${KUTT_DB_NAME}
+      POSTGRES_USER: ${KUTT_DB_USER}
+      POSTGRES_PASSWORD: ${KUTT_DB_PASSWORD}
+    volumes:
+      - ${APPDATA_DIR}/kutt/db:/var/lib/postgresql/data
+
+  # -------------------------------------------------------- PLAUSIBLE ------------------------------------------------------
+
+  plausible:
+    <<: *service-defaults
+    image: plausible/analytics:${PLAUSIBLE_IMAGE_TAG:-latest}
+    container_name: plausible
+    command: sh -c "sleep 10 && /entrypoint.sh db createdb && /entrypoint.sh db migrate && /entrypoint.sh db init-admin && /entrypoint.sh run"
+    depends_on:
+      - plausible-db
+      - plausible-events-db
+    environment:
+      - BASE_URL=https://metrics.${CLOUD_HOST}
+      - DISABLE_REGISTRATION=true
+      - ADMIN_USER_NAME=${PLAUSIBLE_ADMIN_USER_NAME}
+      - ADMIN_USER_EMAIL=${PLAUSIBLE_ADMIN_USER_EMAIL}
+      - ADMIN_USER_PWD=${PLAUSIBLE_ADMIN_USER_PWD}
+      - SECRET_KEY_BASE=${PLAUSIBLE_SECRET_KEY_BASE}
+      - DATABASE_URL=${PLAUSIBLE_DATABASE_URL}
+      - CLICKHOUSE_DATABASE_URL=${PLAUSIBLE_CLICKHOUSE_DATABASE_URL}
+      - MAILER_EMAIL=${PLAUSIBLE_MAILER_EMAIL}
+      - SMTP_USER_PWD=${PLAUSIBLE_SMTP_USER_PWD}
+      - SMTP_HOST_ADDR=${PLAUSIBLE_SMTP_HOST_ADDR}
+      - SMTP_HOST_PORT=${PLAUSIBLE_SMTP_HOST_PORT}
+      - SMTP_HOST_SSL_ENABLED=${PLAUSIBLE_SMTP_HOST_SSL_ENABLED}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.plausible.rule=Host(`metrics.${CLOUD_HOST}`)"
+      - "traefik.http.routers.plausible.tls.certresolver=letsencrypt"
+      - "traefik.http.services.plausible.loadbalancer.server.port=8000"
+      - "traefik.http.routers.plausible.middlewares=plausible@file"
+
+  plausible-db:
+    <<: *service-defaults
+    image: postgres:12
+    container_name: plausible-db
+    volumes:
+      - ${APPDATA_DIR}/plausible/db:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_DB=plausible
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=${PLAUSIBLE_POSTGRES_PASSWORD}
+
+  plausible-events-db:
+    <<: *service-defaults
+    image: yandex/clickhouse-server:21.3.2.5
+    container_name: plausible-events-db
+    volumes:
+      - ${APPDATA_DIR}/plausible/events-db:/var/lib/clickhouse
+      - ${APPDATA_DIR}/plausible/events-db/logs:/var/log/clickhouse-server
+      - ${APPDATA_DIR}/plausible/clickhouse-config:/etc/clickhouse-server
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+
+# -------------------------------------------------------------------------------------------------------
+
+  static-web-server:
+    <<: *service-defaults
+    image: joseluisq/static-web-server:${STATIC_WEB_SERVER_IMAGE_TAG:-latest}
+    container_name: static-web-server
+    volumes:
+      - /home/ubuntu/public:/srv/public:ro
+    environment:
+      - SERVER_ROOT=/srv
+      - SERVER_LOG_LEVEL=info
+      - SERVER_LOG_REMOTE_ADDRESS=true
+      - SERVER_DIRECTORY_LISTING=true
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.static-web-server.rule=Host(`www.${CLOUD_HOST}`)"
+      - "traefik.http.routers.static-web-server.tls.certresolver=letsencrypt"
+      - "traefik.http.services.static-web-server.loadbalancer.server.port=80"
+      - "traefik.http.routers.static-web-server.middlewares=authelia@file"

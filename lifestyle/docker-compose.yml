@@ -1,0 +1,149 @@
+---
+version: "3.9"
+
+networks:
+  default:
+    external: true
+    name: productivity-net
+
+x-defaults: &service-defaults
+  networks:
+    - default
+  security_opt:
+    - no-new-privileges:true
+  restart: unless-stopped
+
+x-env: &default-tz-puid-pgid
+  TZ: Etc/UTC
+  PUID: 1000
+  PGID: 1000
+
+services:
+
+  actual-server:
+    <<: *service-defaults
+    image: jlongster/actual-server:${ACTUAL_IMAGE_TAG:-latest}
+    container_name: actual-server
+    volumes:
+      - ${APPDATA_DIR}/actual-finance/server-files:/app/server-files
+      - ${APPDATA_DIR}/actual-finance/user-files:/app/user-files
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.actual-finance.rule=Host(`actual-finance.${CLOUD_HOST}`)"
+      - "traefik.http.routers.actual-finance.tls.certresolver=letsencrypt"
+      - "traefik.http.services.actual-finance.loadbalancer.server.port=5006"
+      - "traefik.http.routers.actual-finance.middlewares=authelia@file"
+
+  firefly-app:
+    <<: *service-defaults
+    image: fireflyiii/core:${FIREFLY_IMAGE_TAG:-latest}
+    container_name: firefly-app
+    depends_on:
+      - firefly-db
+    environment:
+      - APP_KEY=${FIREFLY_APP_KEY}
+      - DB_HOST=firefly-db
+      - DB_PORT=3306
+      - DB_CONNECTION=mysql
+      - DB_DATABASE=firefly
+      - DB_USERNAME=firefly
+      - DB_PASSWORD=${FIREFLY_DB_PASSWORD}
+      - APP_URL=https://firefly.${CLOUD_HOST}
+      - TRUSTED_PROXIES=172.29.0.200
+      - MAIL_MAILER=smtp
+      - MAIL_HOST=mx1.${BASE_DOMAIN}
+      - MAIL_PORT=587
+      - MAIL_FROM=firefly@${BASE_DOMAIN}
+      - MAIL_USERNAME=notifications@${BASE_DOMAIN}
+      - MAIL_PASSWORD=${FIREFLY_MAIL_PASSWORD}
+      - MAIL_ENCRYPTION=tls
+    volumes:
+      - ${APPDATA_DIR}/firefly/upload:/var/www/html/storage/upload
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.firefly.rule=Host(`firefly.${CLOUD_HOST}`)"
+      - "traefik.http.routers.firefly.tls.certresolver=letsencrypt"
+      - "traefik.http.services.firefly.loadbalancer.server.port=8080"
+
+  firefly-db:
+    <<: *service-defaults
+    container_name: firefly-db
+    image: mariadb:${FIREFLY_DB_IMAGE_TAG:-10}
+    hostname: firefly-db
+    environment:
+      - MYSQL_DATABASE=firefly
+      - MYSQL_USER=firefly
+      - MYSQL_PASSWORD=${FIREFLY_DB_PASSWORD}
+      - MYSQL_ROOT_PASSWORD=${FIREFLY_DB_ROOT_PASSWORD}
+    volumes:
+      - ${APPDATA_DIR}/firefly/db:/var/lib/mysql
+
+
+  tandoor-nginx:
+    <<: *service-defaults
+    image: nginx:mainline-alpine
+    container_name: tandoor-nginx
+    depends_on:
+      - tandoor-web
+    volumes:
+      - ${APPDATA_DIR}/tandoor/nginx_config:/etc/nginx/conf.d:ro
+      - ${APPDATA_DIR}/tandoor/staticfiles:/static:ro
+      - ${APPDATA_DIR}/tandoor/mediafiles:/media:ro
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.tandoor.rule=Host(`tandoor.${CLOUD_HOST}`)"
+      - "traefik.http.routers.tandoor.tls.certresolver=letsencrypt"
+      - "traefik.http.services.tandoor.loadbalancer.server.port=80"
+
+  tandoor-web:
+    <<: *service-defaults
+    image: vabene1111/recipes:${TANDOOR_IMAGE_TAG:-latest}
+    container_name: tandoor-web
+    depends_on:
+      - tandoor-db
+    volumes:
+      - ${APPDATA_DIR}/tandoor/staticfiles:/opt/recipes/staticfiles
+      - ${APPDATA_DIR}/tandoor/nginx_config:/opt/recipes/nginx/conf.d
+      - ${APPDATA_DIR}/tandoor/mediafiles:/opt/recipes/mediafiles
+    environment:
+      POSTGRES_HOST: tandoor-db
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: tandoor
+      POSTGRES_USER: tandoor
+      POSTGRES_PASSWORD: ${TANDOOR_DB_PASSWORD}
+      SECRET_KEY: ${TANDOOR_SECRET_KEY}
+      DB_ENGINE: django.db.backends.postgresql
+      TIMEZONE: Etc/UTC
+      ALLOWED_HOSTS: "*"
+      REVERSE_PROXY_AUTH: 0
+      FRACTION_PREF_DEFAULT: 0
+      COMMENT_PREF_DEFAULT: 1
+      SHOPPING_MIN_AUTOSYNC_INTERVAL: 5
+      GUNICORN_MEDIA: 0
+      DEBUG: 0
+      SQL_DEBUG: 0
+
+  tandoor-db:
+    <<: *service-defaults
+    image: postgres:11-alpine
+    container_name: tandoor-db
+    volumes:
+      - ${APPDATA_DIR}/tandoor/db:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: tandoor
+      POSTGRES_USER: tandoor
+      POSTGRES_PASSWORD: ${TANDOOR_DB_PASSWORD}
+ 
+  grocy:
+    <<: *service-defaults
+    image: lscr.io/linuxserver/grocy:${GROCY_IMAGE_TAG:-latest}
+    container_name: grocy
+    environment:
+      <<: *default-tz-puid-pgid
+    volumes:
+      - ${APPDATA_DIR}/grocy:/config
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.grocy.rule=Host(`grocy.${CLOUD_HOST}`)"
+      - "traefik.http.routers.grocy.tls.certresolver=letsencrypt"
+      - "traefik.http.services.grocy.loadbalancer.server.port=80"

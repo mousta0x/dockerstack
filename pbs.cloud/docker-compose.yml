@@ -1,0 +1,43 @@
+---
+version: "3.9"
+
+volumes:
+  pbs-logs:
+    name: pbs-logs
+    external: true
+  asgard-pbs:
+    name: asgard-pbs
+    external: true
+
+x-defaults: &service-defaults
+  networks:
+    - default
+  security_opt:
+    - no-new-privileges:true
+  restart: unless-stopped
+
+services:
+
+  proxmox-backup-server:
+    <<: *service-defaults
+    image: ayufan/proxmox-backup-server:${PBS_IMAGE_TAG:-v2.2.5}
+    container_name: proxmox-backup-server
+    hostname: pbs.cloud
+    environment:
+      TZ: UTC
+    ports:
+      - 8007:8007
+    mem_limit: 5.5G
+    stop_signal: SIGHUP
+    volumes:
+      - asgard-pbs:/mnt/media/pbs
+      - pbs-logs:/var/log/proxmox-backup
+      - ${APPDATA_DIR}/pbs/etc:/etc/proxmox-backup
+      - ${APPDATA_DIR}/pbs/lib:/var/lib/proxmox-backup
+    tmpfs:
+      - /run
+    healthcheck:
+      test: ls /mnt/media/pbs/.mount >/dev/null 2>&1 && true || false
+      interval: 20s
+      timeout: 20s
+      retries: 3

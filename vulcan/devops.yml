@@ -1,0 +1,73 @@
+---
+version: "3.9"
+
+networks:
+  default:
+    name: dind-net
+    external: true
+
+volumes:
+  dind-certs:
+    name: dind-certs
+    external: true
+  jenkins-home:
+    name: jenkins-home
+    external: true
+
+x-defaults: &service-defaults
+  networks:
+    - default
+  security_opt:
+    - no-new-privileges:true
+  restart: unless-stopped
+
+services:
+
+  drone-docker-runner:
+    <<: *service-defaults
+    image: drone/drone-runner-docker:${DRONE_RUNNER_IMAGE_TAG:-1}
+    container_name: drone-runner
+    environment:
+      DRONE_RPC_SECRET: ${DRONE_RPC_SECRET}
+      DRONE_RPC_HOST: drone.${CLOUD_HOST}
+      DRONE_RPC_PROTO: https
+      DRONE_RUNNER_CAPACITY: 2
+      DRONE_RUNNER_NAME: vulcan-amd64
+      DRONE_UI_USERNAME: ${DRONE_UI_USERNAME}
+      DRONE_UI_PASSWORD: ${DRONE_UI_PASSWORD}
+      # DRONE_DEBUG=true
+      # DRONE_TRACE=true
+    ports:
+      - 8900:3000
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  docker-in-docker:
+    <<: *service-defaults
+    image: docker:dind
+    container_name: docker-in-docker
+    privileged: true
+    environment:
+      DOCKER_TLS_CERTDIR: /certs
+    ports:
+      - 2380:2376
+    volumes:
+      - dind-certs:/certs/client
+      - jenkins-home:/var/jenkins_home
+
+  cronicle:
+    <<: *service-defaults
+    image: bluet/cronicle-docker:${CRONICLE_IMAGE_TAG:-latest}
+    container_name: cronicle
+    hostname: cronicle.${CLOUD_HOST}
+    environment:
+      TZ: Etc/UTC
+      CRONICLE_base_app_url: https://cronicle.${CLOUD_HOST}
+    ports:
+      - 3012:3012
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${APPDATA_DIR}/cronicle/data:/opt/cronicle/data
+      - ${APPDATA_DIR}/cronicle/logs:/opt/cronicle/logs
+      - ${APPDATA_DIR}/cronicle/plugins:/opt/cronicle/plugins
+      - ${APPDATA_DIR}/cronicle/workloads/app:/app

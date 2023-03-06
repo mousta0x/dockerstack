@@ -1,0 +1,184 @@
+---
+version: "3.9"
+
+networks:
+  default:
+    name: devops-net
+    external: true
+  dind-net:
+    name: dind-net
+    external: true
+
+x-env: &default-tz-puid-pgid
+  TZ: Etc/UTC
+  PUID: 1000
+  PGID: 1000
+
+x-defaults: &service-defaults
+  networks:
+    - default
+  security_opt:
+    - no-new-privileges:true
+  restart: unless-stopped
+
+# ----------------------------------------------------------------------------------------------------------------------------------
+services:
+# -------------------------------------------------------- DevOps ------------------------------------------------------------------
+
+  gitea:
+    <<: *service-defaults
+    image: gitea/gitea:${GITEA_IMAGE_TAG:-latest}
+    container_name: gitea
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      - GITEA__database__DB_TYPE=mysql
+      - GITEA__database__HOST=gitea-db:3306
+      - GITEA__database__NAME=gitea
+      - GITEA__database__USER=gitea
+      - GITEA__database__PASSWD=${GITEA_DB_PASSWORD}
+      - GITEA__service__REGISTER_MANUAL_CONFIRM=true
+      - GITEA__server__SSH_DOMAIN=gitea.${CLOUD_HOST}
+      - GITEA__server__SSH_PORT=2002
+    volumes:
+      - ${APPDATA_DIR}/gitea:/data
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      - gitea-db
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.gitea.rule=Host(`gitea.${CLOUD_HOST}`)"
+      - "traefik.http.routers.gitea.tls.certresolver=letsencrypt"
+      - "traefik.http.services.gitea.loadbalancer.server.port=3000"
+      - "traefik.tcp.routers.ssh-gitea.rule=HostSNI(`*`)"
+      - "traefik.tcp.routers.ssh-gitea.entrypoints=ssh-gitea"
+      - "traefik.tcp.services.ssh-gitea.loadbalancer.server.port=22"
+
+  gitea-db:
+    <<: *service-defaults
+    image: ${GITEA_DB_IMAGE:-mariadb:10}
+    container_name: gitea-db
+    environment:
+      - MYSQL_ROOT_PASSWORD=${GITEA_DB_ROOT_PASSWORD}
+      - MYSQL_USER=gitea
+      - MYSQL_PASSWORD=${GITEA_DB_PASSWORD}
+      - MYSQL_DATABASE=gitea
+    volumes:
+      - ${APPDATA_DIR}/gitea-db:/var/lib/mysql
+
+  jenkins:
+    <<: *service-defaults
+    image: registry.${CLOUD_HOST}/jenkins-blueocean:${JENKINS_IMAGE_TAG:-2.366}
+    container_name: jenkins
+    mem_limit: 3G
+    environment:
+      DOCKER_HOST: tcp://vulcan.hzcloud:2380
+      DOCKER_CERT_PATH: /certs/client
+      DOCKER_TLS_VERIFY: 1
+    volumes:
+      - ${CERTS_DIR}/vulcan-dind-certs:/certs/client:ro
+      - ${APPDATA_DIR}/jenkins:/var/jenkins_home
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.jenkins.rule=Host(`jenkins.${CLOUD_HOST}`)"
+      - "traefik.http.routers.jenkins.tls.certresolver=letsencrypt"
+      - "traefik.http.services.jenkins.loadbalancer.server.port=8080"
+  
+  drone:
+    <<: *service-defaults
+    image: drone/drone:${DRONE_IMAGE_TAG:-2}
+    container_name: drone
+    environment:
+      - DRONE_GITEA_SERVER=https://gitea.${CLOUD_HOST}
+      - DRONE_GITEA_CLIENT_ID=${DRONE_GITEA_CLIENT_ID}
+      - DRONE_GITEA_CLIENT_SECRET=${DRONE_GITEA_CLIENT_SECRET}
+      - DRONE_RPC_SECRET=${DRONE_RPC_SECRET}
+      - DRONE_SERVER_HOST=drone.${CLOUD_HOST}
+      - DRONE_SERVER_PROTO=https
+      #- DRONE_LOGS_DEBUG=true
+      #- DRONE_LOGS_TRACE=true
+    volumes:
+      - ${APPDATA_DIR}/drone:/data
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.drone.rule=Host(`drone.${CLOUD_HOST}`)"
+      - "traefik.http.routers.drone.tls.certresolver=letsencrypt"
+      - "traefik.http.services.drone.loadbalancer.server.port=80"
+
+  docker-registry:
+    <<: *service-defaults
+    image: registry:${REGISTRY_IMAGE_TAG:-2}
+    container_name: docker-registry
+    environment:
+      REGISTRY_AUTH: htpasswd
+      REGISTRY_AUTH_HTPASSWD_PATH: /auth/htpasswd
+      REGISTRY_AUTH_HTPASSWD_REALM: Registry Realm
+    volumes:
+      - ${APPDATA_DIR}/docker-registry/registry:/var/lib/registry
+      - ${APPDATA_DIR}/docker-registry/auth:/auth
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.docker-registry.rule=Host(`registry.${CLOUD_HOST}`)"
+      - "traefik.http.routers.docker-registry.tls.certresolver=letsencrypt"
+      - "traefik.http.services.docker-registry.loadbalancer.server.port=5000"
+
+  registry-browser:
+    <<: *service-defaults
+    image: klausmeyer/docker-registry-browser:${REGISTRY_BROWSER_IMAGE_TAG:-latest}
+    container_name: registry-browser
+    environment:
+      - DOCKER_REGISTRY_URL=http://docker-registry:5000
+      - NO_SSL_VERIFICATION=true
+      - PUBLIC_REGISTRY_URL=registry.${CLOUD_HOST}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.registry-browser.rule=Host(`hub.${CLOUD_HOST}`)"
+      - "traefik.http.routers.registry-browser.tls.certresolver=letsencrypt"
+      - "traefik.http.services.registry-browser.loadbalancer.server.port=8080"
+
+  vault:
+    <<: *service-defaults
+    image: vault:${VAULT_IMAGE_TAG:-latest}
+    container_name: vault
+    environment:
+      - VAULT_API_ADDR=https://vault.${CLOUD_HOST}
+    cap_add:
+      - IPC_LOCK
+    volumes:
+      - ${APPDATA_DIR}/vault/storage:/vault/file
+      - ${APPDATA_DIR}/vault/logs:/vault/logs
+      - ${APPDATA_DIR}/vault/config:/vault/config
+      - ${APPDATA_DIR}/vault/plugins:/vault/plugins
+      - ${CERTS_DIR}/vault:/certs:ro
+    healthcheck:
+      retries: 5
+    entrypoint: vault server -config=/vault/config/vault-config.hcl
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.vault.rule=Host(`vault.${CLOUD_HOST}`)"
+      - "traefik.http.routers.vault.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.vault.service=vault"
+      - "traefik.http.services.vault.loadbalancer.server.port=8200"
+      - "traefik.http.services.vault.loadbalancer.server.scheme=https"
+      - "traefik.http.services.vault.loadbalancer.serverstransport=traefik-vault-mtls@file"
+
+  code-server:
+    <<: *service-defaults
+    image: lscr.io/linuxserver/code-server:${CODESERVER_IMAGE_TAG:-latest}
+    container_name: code-server
+    environment:
+      <<: *default-tz-puid-pgid
+      PASSWORD: ${CODE_SERVER_PASSWORD}
+      PROXY_DOMAIN: code.${CLOUD_HOST}
+      DEFAULT_WORKSPACE: /config/workspace
+    volumes:
+      - ${APPDATA_DIR}/code-server:/config
+    tmpfs:
+      - /tmp
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.code.rule=Host(`code.${CLOUD_HOST}`)"
+      - "traefik.http.routers.code.tls.certresolver=letsencrypt"
+      - "traefik.http.services.code.loadbalancer.server.port=8443"
+      - "traefik.http.routers.code.middlewares=authelia@file"

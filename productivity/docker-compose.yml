@@ -1,0 +1,537 @@
+---
+version: "3.9"
+
+networks:
+  default:
+    external: true
+    name: productivity-net
+
+x-defaults: &service-defaults
+  networks:
+    - default
+  security_opt:
+    - no-new-privileges:true
+  restart: unless-stopped
+
+x-env: &default-tz-puid-pgid
+  TZ: Etc/UTC
+  PUID: 1000
+  PGID: 1000
+
+services:
+  #--------------------------------------- nextcloud --------------------------------------------------
+
+  nextcloud:
+    <<: *service-defaults
+    image: nextcloud:${NEXTCLOUD_IMAGE_TAG:-25}
+    container_name: nextcloud
+    links:
+      - nextcloud-db
+      - nextcloud-redis
+    environment:
+      MYSQL_PASSWORD: ${NEXTCLOUD_MYSQL_PASSWORD}
+      MYSQL_DATABASE: nextcloud
+      MYSQL_USER: nextcloud
+      MYSQL_HOST: nextcloud-db
+      REDIS_HOST: nextcloud-redis
+      NEXTCLOUD_HOSTNAME: https://nextcloud.${BASE_DOMAIN}
+      VIRTUAL_HOST: nextcloud.${BASE_DOMAIN}
+      OBJECTSTORE_S3_HOST: minio.${CLOUD_HOST}
+      OBJECTSTORE_S3_KEY: ${NEXTCLOUD_MINIO_ACCESS_KEY}
+      OBJECTSTORE_S3_SECRET: ${NEXTCLOUD_MINIO_SECRET_KEY}
+      OBJECTSTORE_S3_BUCKET: nextcloud
+      OBJECTSTORE_S3_PORT: 443
+      OBJECTSTORE_S3_SSL: true
+      OBJECTSTORE_S3_USEPATH_STYLE: true
+      NEXTCLOUD_DATA_DIR: /data
+      TZ: Etc/UTC
+    volumes:
+      - ${APPDATA_DIR}/nextcloud/config:/var/www/html
+      - ${APPDATA_DIR}/nextcloud/data:/data
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.nextcloud.rule=Host(`nextcloud.${BASE_DOMAIN}`)"
+      - "traefik.http.routers.nextcloud.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.nextcloud.middlewares=nextcloud-sec-headers@file,nextcloud-dav@file"
+      - "traefik.http.services.nextcloud.loadbalancer.server.port=80"
+
+  nextcloud-db:
+    <<: *service-defaults
+    image: mariadb:${NEXTCLOUD_DB_IMAGE_TAG:-10.7}
+    container_name: nextcloud-db
+    command: --transaction-isolation=READ-COMMITTED --binlog-format=ROW --skip-innodb-read-only-compressed
+    environment:
+      MYSQL_DATABASE: nextcloud
+      MYSQL_USER: nextcloud
+      MYSQL_ROOT_PASSWORD: ${NEXTCLOUD_MYSQL_ROOT_PASSWORD}
+      MYSQL_PASSWORD: ${NEXTCLOUD_MYSQL_PASSWORD}
+    volumes:
+      - ${APPDATA_DIR}/nextcloud/db:/var/lib/mysql
+
+  nextcloud-redis:
+    <<: *service-defaults
+    image: redis:7
+    container_name: nextcloud-redis
+    volumes:
+      - ${APPDATA_DIR}/nextcloud/redis:/data
+
+  collabora:
+    image: collabora/code:${COLLABORA_IMAGE_TAG:-22.05.9.2.1}
+    container_name: collabora
+    restart: unless-stopped
+    cap_add:
+      - MKNOD
+    environment:
+      - domain=nextcloud.${BASE_DOMAIN}
+      - extra_params=--o:server_name=collabora.${CLOUD_HOST} --o:ssl.enable=false --o:ssl.termination=true --o:net.proto=IPv4 --o net.post_allow.host=172.29\.0\.[0-9]+
+      - username=admin
+      - password=${NEXTCLOUD_COLLABORA_PASSWORD}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.collabora.rule=Host(`collabora.${CLOUD_HOST}`)"
+      - "traefik.http.routers.collabora.tls.certresolver=letsencrypt"
+      - "traefik.http.services.collabora.loadbalancer.server.port=9980"
+
+  # ---------------------------------- standardnotes ----------------------------------------------
+
+  standardnotes-server:
+    <<: *service-defaults
+    image: standardnotes/server:${SN_SERVER_IMAGE_TAG:-latest}
+    container_name: standardnotes-server
+    environment:
+      DB_HOST: ${SN_DB_HOST}
+      DB_PORT: ${SN_DB_PORT}
+      DB_USERNAME: ${SN_DB_USER}
+      DB_PASSWORD: ${SN_DB_PWD}
+      DB_DATABASE: ${SN_DB_NAME}
+      DB_DEBUG_LEVEL: ${SN_DB_DEBUG_LEVEL}
+      REDIS_HOST: ${SN_REDIS_HOST}
+      REDIS_PORT: ${SN_REDIS_PORT}
+      PUBLIC_FILES_SERVER_URL: https://standardnotes-files.${CLOUD_HOST}
+      AUTH_JWT_SECRET: ${SN_AUTH_JWT_SECRET}
+      AUTH_SERVER_LEGACY_JWT_SECRET: ${SN_AUTH_SERVER_LEGACY_JWT_SECRET}
+      VALET_TOKEN_SECRET: ${SN_VALET_TOKEN_SECRET}
+      AUTH_SERVER_PSEUDO_KEY_PARAMS_KEY: ${SN_AUTH_SERVER_PSEUDO_KEY_PARAMS_KEY}
+      AUTH_SERVER_ENCRYPTION_SERVER_KEY: ${SN_AUTH_SERVER_ENCRYPTION_SERVER_KEY}
+      REVISIONS_SERVER_PORT: 3005
+    volumes:
+      - ${APPDATA_DIR}/standardnotes/uploads:/opt/bundled/files/packages/files/dist/uploads
+      # - ${APPDATA_DIR}/standardnotes/uploads:/opt/shared/uploads
+      - ${APPDATA_DIR}/standardnotes/logs:/var/lib/server/logs
+    labels:
+      - "traefik.enable=true"
+      # api-gateway
+      - "traefik.http.routers.standardnotes-api.rule=Host(`standardnotes-api.${CLOUD_HOST}`)"
+      - "traefik.http.routers.standardnotes-api.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.standardnotes-api.service=standardnotes-api"
+      - "traefik.http.services.standardnotes-api.loadbalancer.server.port=3000"
+      # files
+      - "traefik.http.routers.standardnotes-files.rule=Host(`standardnotes-files.${CLOUD_HOST}`)"
+      - "traefik.http.routers.standardnotes-files.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.standardnotes-files.service=standardnotes-files"
+      - "traefik.http.services.standardnotes-files.loadbalancer.server.port=3104"
+      # web-ui
+      # - "traefik.http.routers.standardnotes.rule=Host(`standardnotes.${CLOUD_HOST}`)"
+      # - "traefik.http.routers.standardnotes.tls.certresolver=letsencrypt"
+      # - "traefik.http.services.standardnotes.loadbalancer.server.port=3001"
+
+  localstack:
+    <<: *service-defaults
+    image: localstack/localstack:${SN_LOCALSTACK_IMAGE_TAG:-1.3}
+    container_name: standardnotes-localstack
+    environment:
+      SERVICES: sns,sqs
+      HOSTNAME_EXTERNAL: localstack
+      DOCKER_HOST: unix:///var/run/docker.sock
+      LS_LOG: warn
+    volumes:
+      - ${APPDATA_DIR}/standardnotes/scripts/localstack_bootstrap.sh:/etc/localstack/init/ready.d/localstack_bootstrap.sh
+
+  standardnotes-db:
+    <<: *service-defaults
+    image: mysql:${SN_DB_IMAGE_TAG:-8}
+    container_name: standardnotes-db
+    command: --default-authentication-plugin=mysql_native_password --character-set-server=utf8mb4 --collation-server=utf8mb4_general_ci
+    environment:
+      MYSQL_DATABASE: ${SN_DB_NAME}
+      MYSQL_USER: ${SN_DB_USER}
+      MYSQL_PASSWORD: ${SN_DB_PWD}
+      MYSQL_ROOT_PASSWORD: ${SN_DB_ROOT_PWD}
+    volumes:
+      - ${APPDATA_DIR}/standardnotes/db:/var/lib/mysql
+      # - ${APPDATA_DIR}/standardnotes/import:/docker-entrypoint-initdb.d
+
+  standardnotes-cache:
+    <<: *service-defaults
+    image: redis:${SN_REDIS_IMAGE_TAG:-6.0-alpine}
+    container_name: standardnotes-cache
+    volumes:
+      - ${APPDATA_DIR}/standardnotes/redis/:/data
+
+# ----------------------------------------------- paperless ----------------------------------------------------
+
+  paperless-web:
+    <<: *service-defaults
+    image: ghcr.io/paperless-ngx/paperless-ngx:${PAPERLESS_IMAGE_TAG:-latest}
+    container_name: paperless-web
+    depends_on:
+      - paperless-db
+      - paperless-broker
+      - paperless-tika
+      - paperless-gotenberg
+    healthcheck:
+      test:
+        ["CMD", "curl", "-fs", "-S", "--max-time", "2", "http://localhost:8000"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    environment:
+      PAPERLESS_REDIS: redis://paperless-broker:6379
+      PAPERLESS_DBENGINE: postgres
+      PAPERLESS_DBHOST: paperless-db
+      PAPERLESS_DBPASS: ${PAPERLESS_DB_PASSWORD}
+      PAPERLESS_TIKA_ENABLED: 1
+      PAPERLESS_TIKA_GOTENBERG_ENDPOINT: http://paperless-gotenberg:3000
+      PAPERLESS_TIKA_ENDPOINT: http://paperless-tika:9998
+      USERMAP_UID: 1000
+      USERMAP_GID: 1000
+      PAPERLESS_OCR_LANGUAGES: ara
+      PAPERLESS_TIME_ZONE: Etc/UTC
+      PAPERLESS_OCR_LANGUAGE: eng
+      PAPERLESS_URL: https://paperless.${CLOUD_HOST}
+      PAPERLESS_SECRET_KEY: ${PAPERLESS_SECRET_KEY}
+    volumes:
+      - ${APPDATA_DIR}/paperless/data:/usr/src/paperless/data
+      - ${APPDATA_DIR}/paperless/media:/usr/src/paperless/media
+      - ${APPDATA_DIR}/paperless/export:/usr/src/paperless/export
+      - ${APPDATA_DIR}/paperless/consume:/usr/src/paperless/consume
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.paperless.rule=Host(`paperless.${CLOUD_HOST}`)"
+      - "traefik.http.routers.paperless.tls.certresolver=letsencrypt"
+      - "traefik.http.services.paperless.loadbalancer.server.port=8000"
+
+  paperless-db:
+    <<: *service-defaults
+    image: postgres:13
+    container_name: paperless-db
+    environment:
+      POSTGRES_DB: paperless
+      POSTGRES_USER: paperless
+      POSTGRES_PASSWORD: ${PAPERLESS_DB_PASSWORD}
+    volumes:
+      - ${APPDATA_DIR}/paperless/db:/var/lib/postgresql/data
+
+  paperless-broker:
+    <<: *service-defaults
+    image: redis:${PAPERLESS_REDIS_IMAGE_TAG:-7.0}
+    container_name: paperless-broker
+
+  paperless-gotenberg:
+    <<: *service-defaults
+    image: docker.io/gotenberg/gotenberg:${PAPERLESS_GOTENBERG_IMAGE_TAG:-7.6}
+    container_name: paperless-gotenberg
+    command:
+      - "gotenberg"
+      - "--chromium-disable-javascript=true"
+      - "--chromium-allow-list=file:///tmp/.*"
+
+  paperless-tika:
+    <<: *service-defaults
+    image: ghcr.io/paperless-ngx/tika:${PAPERLESS_TIKA_IMAGE_TAG:-latest}
+    container_name: paperless-tika
+
+  # -------------------------------------------------------------------------------
+
+  vikunja-frontend:
+    <<: *service-defaults
+    image: vikunja/frontend:${VIKUNJA_FRONTEND_IMAGE_TAG:-latest}
+    container_name: vikunja-frontend
+    environment:
+      VIKUNJA_API_URL: https://vikunja.${CLOUD_HOST}/api/v1
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.vikunja.rule=Host(`vikunja.${CLOUD_HOST}`)"
+      - "traefik.http.routers.vikunja.tls.certresolver=letsencrypt"
+      - "traefik.http.services.vikunja.loadbalancer.server.port=80"
+
+  vikunja-api:
+    <<: *service-defaults
+    image: vikunja/api:${VIKUNJA_API_IMAGE_TAG:-latest}
+    container_name: vikunja-api
+    depends_on:
+      - vikunja-db
+    environment:
+      VIKUNJA_DATABASE_TYPE: mysql
+      VIKUNJA_DATABASE_HOST: vikunja-db
+      VIKUNJA_DATABASE_DATABASE: vikunja
+      VIKUNJA_DATABASE_USER: vikunja
+      VIKUNJA_DATABASE_PASSWORD: ${VIKUNJA_DATABASE_PASSWORD}
+      VIKUNJA_CACHE_ENABLED: 1
+      VIKUNJA_CACHE_TYPE: redis
+      VIKUNJA_REDIS_ENABLED: 1
+      VIKUNJA_REDIS_HOST: "vikunja-redis:6379"
+      VIKUNJA_SERVICE_FRONTENDURL: https://vikunja.${CLOUD_HOST}/
+      VIKUNJA_SERVICE_JWTSECRET: ${VIKUNJA_SERVICE_JWTSECRET}
+      VIKUNJA_SERVICE_ENABLEREGISTRATION: ${VIKUNJA_SERVICE_ENABLEREGISTRATION}
+    volumes:
+      - ${APPDATA_DIR}/vikunja/files:/app/vikunja/files
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.vikunja-api.rule=Host(`vikunja.${CLOUD_HOST}`) && (PathPrefix(`/api`) || PathPrefix(`/dav`) || PathPrefix(`/.well-known`))"
+      - "traefik.http.routers.vikunja-api.tls.certresolver=letsencrypt"
+      - "traefik.http.services.vikunja-api.loadbalancer.server.port=3456"
+
+  vikunja-db:
+    <<: *service-defaults
+    image: mariadb:${VIKUNJA_DB_IMAGE_TAG:-10}
+    container_name: vikunja-db
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_DATABASE: vikunja
+      MYSQL_USER: vikunja
+      MYSQL_PASSWORD: ${VIKUNJA_DATABASE_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${VIKUNJA_DATABASE_ROOT_PASSWORD}
+    volumes:
+      - ${APPDATA_DIR}/vikunja/db:/var/lib/mysql
+
+  vikunja-redis:
+    <<: *service-defaults
+    image: redis:${VIKUNJA_REDIS_IMAGE_TAG:-latest}
+    container_name: vikunja-redis
+
+  focalboard:
+    <<: *service-defaults
+    image: mattermost/focalboard:${FOCALBOARD_IMAGE_TAG:-latest}
+    container_name: focalboard
+    environment:
+      <<: *default-tz-puid-pgid
+    volumes:
+      - ${APPDATA_DIR}/focalboard/config:/config
+      - ${APPDATA_DIR}/focalboard/data:/data
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.focalboard.rule=Host(`focalboard.${CLOUD_HOST}`)"
+      - "traefik.http.routers.focalboard.tls.certresolver=letsencrypt"
+      - "traefik.http.services.focalboard.loadbalancer.server.port=8000"
+
+  # affine:
+  #   <<: *service-defaults
+  #   image: ghcr.io/toeverything/affine:nightly-latest
+  #   container_name: affine
+  #   volumes:
+  #     - ${APPDATA_DIR}/affine/config:/config
+  #     - ${APPDATA_DIR}/affine/data:/data
+  #   labels:
+  #     - 'traefik.enable=true'
+  #     - 'traefik.http.routers.affine.rule=Host(`affine.${CLOUD_HOST}`)'
+  #     - 'traefik.http.routers.affine.entrypoints=https'
+  #     - 'traefik.http.routers.affine.tls.certresolver=letsencrypt'
+  #     - 'traefik.http.services.affine.loadbalancer.server.port=3000'
+
+  trilium:
+    <<: *service-defaults
+    image: zadam/trilium:${TRILIUM_IMAGE_TAG:-latest}
+    container_name: trilium
+    environment:
+      - TRILIUM_DATA_DIR=/data
+    volumes:
+      - ${APPDATA_DIR}/trilium:/data
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.trilium.rule=Host(`trilium.${CLOUD_HOST}`)"
+      - "traefik.http.routers.trilium.tls.certresolver=letsencrypt"
+      - "traefik.http.services.trilium.loadbalancer.server.port=8080"
+      - "traefik.http.routers.trilium.middlewares=authelia@file"
+
+  calibre:
+    <<: *service-defaults
+    image: lscr.io/linuxserver/calibre-web:${CALIBRE_WEB_IMAGE_TAG:-latest}
+    container_name: calibre
+    environment:
+      <<: *default-tz-puid-pgid
+      DOCKER_MODS: ghcr.io/linuxserver/mods:universal-calibre
+    volumes:
+      - ${APPDATA_DIR}/calibre:/config
+      - /mnt/media/ebooks/calibre-library:/books
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.calibre.rule=Host(`calibre.${CLOUD_HOST}`)"
+      - "traefik.http.routers.calibre.tls.certresolver=letsencrypt"
+      - "traefik.http.services.calibre.loadbalancer.server.port=8083"
+      - "traefik.http.routers.calibre.middlewares=authelia@file"
+    
+  cops:
+    <<: *service-defaults
+    image: lscr.io/linuxserver/cops:${COPS_IMAGE_TAG:-latest}
+    container_name: cops
+    environment:
+      <<: *default-tz-puid-pgid
+    volumes:
+      - ${APPDATA_DIR}/cops:/config
+      - /mnt/media/ebooks/calibre-library:/books
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.cops.rule=Host(`cops.${CLOUD_HOST}`)"
+      - "traefik.http.routers.cops.tls.certresolver=letsencrypt"
+      - "traefik.http.services.cops.loadbalancer.server.port=80"
+      - "traefik.http.routers.cops.middlewares=authelia-basic@file"
+
+  lazylibrarian:
+    <<: *service-defaults
+    image: lscr.io/linuxserver/lazylibrarian:${LAZYLIBRARIAN_IMAGE_TAG:-latest}
+    container_name: lazylibrarian
+    environment:
+      <<: *default-tz-puid-pgid
+      DOCKER_MODS: lscr.io/linuxserver/mods:universal-calibre|lscr.io/linuxserver/mods:lazylibrarian-ffmpeg #optional
+    volumes:
+      - ${APPDATA_DIR}/lazylibrarian:/config
+      - /mnt/media/downloads/complete/ebooks:/downloads
+      - /mnt/media/audiobooks:/audiobooks
+      - /mnt/media/ebooks/calibre-library:/books
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.lazylibrarian.rule=Host(`lazylibrarian.${CLOUD_HOST}`)"
+      - "traefik.http.routers.lazylibrarian.tls.certresolver=letsencrypt"
+      - "traefik.http.services.lazylibrarian.loadbalancer.server.port=5299"
+      - "traefik.http.routers.lazylibrarian.middlewares=authelia@file"
+
+  wikijs:
+    <<: *service-defaults
+    image: ghcr.io/requarks/wiki:${WIKIJS_IMAGE_TAG:-2}
+    container_name: wikijs
+    depends_on:
+      - wikijs-db
+    environment:
+      DB_TYPE: postgres
+      DB_HOST: wikijs-db
+      DB_PORT: 5432
+      DB_NAME: wiki
+      DB_USER: wikijs
+      DB_PASS: ${WIKIJS_DB_PASS}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.wikijs.rule=Host(`wiki.${CLOUD_HOST}`)"
+      - "traefik.http.routers.wikijs.tls.certresolver=letsencrypt"
+      - "traefik.http.services.wikijs.loadbalancer.server.port=3000"
+      - "traefik.http.routers.wikijs.middlewares=authelia@file"
+
+  wikijs-db:
+    <<: *service-defaults
+    image: postgres:11-alpine
+    container_name: wikijs-db
+    environment:
+      POSTGRES_DB: wiki
+      POSTGRES_USER: wikijs
+      POSTGRES_PASSWORD: ${WIKIJS_DB_PASS}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "1m"
+    volumes:
+      - ${APPDATA_DIR}/wikijs:/var/lib/postgresql/data
+
+  languagetool:
+    <<: *service-defaults
+    image: erikvl87/languagetool:${LANGUAGETOOL_IMAGE_TAG:-latest}
+    container_name: languagetool
+    environment:
+      - Java_Xms=512m
+      - Java_Xmx=2g
+      - langtool_languageModel=/ngrams
+    volumes:
+      - ${APPDATA_DIR}/languagetool:/ngrams
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.languagetool.rule=Host(`languagetool.${CLOUD_HOST}`)"
+      - "traefik.http.routers.languagetool.tls.certresolver=letsencrypt"
+      - "traefik.http.services.languagetool.loadbalancer.server.port=8010"
+
+  freshrss:
+    <<: *service-defaults
+    image: lscr.io/linuxserver/freshrss:${FRESHRSS_IMAGE_TAG:-latest}
+    container_name: freshrss
+    environment:
+      <<: *default-tz-puid-pgid
+    volumes:
+      - ${APPDATA_DIR}/freshrss:/config
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.freshrss.rule=Host(`freshrss.${CLOUD_HOST}`)"
+      - "traefik.http.routers.freshrss.tls.certresolver=letsencrypt"
+      - "traefik.http.services.freshrss.loadbalancer.server.port=80"
+
+  cryptpad:
+    <<: *service-defaults
+    container_name: cryptpad
+    image: promasu/cryptpad:nginx
+    hostname: cryptpad
+    environment:
+      - CPAD_MAIN_DOMAIN=cryptpad.${BASE_DOMAIN}
+      - CPAD_SANDBOX_DOMAIN=sandbox.cryptpad.${BASE_DOMAIN}
+      - CPAD_HTTP2_DISABLE=true
+      - CPAD_REALIP_HEADER=X-Forwarded-For
+      - TZ=Etc/UTC # optional
+    volumes:
+      - ${APPDATA_DIR}/cryptpad/blob:/cryptpad/blob
+      - ${APPDATA_DIR}/cryptpad/block:/cryptpad/block
+      - ${APPDATA_DIR}/cryptpad/customize:/cryptpad/customize
+      - ${APPDATA_DIR}/cryptpad/data:/cryptpad/data
+      - ${APPDATA_DIR}/cryptpad/files:/cryptpad/datastore
+      - ${APPDATA_DIR}/cryptpad/config:/cryptpad/config
+      - ${APPDATA_DIR}/cryptpad/nginx:/etc/nginx/conf.d
+    ulimits:
+      nofile:
+        soft: 1000000
+        hard: 1000000
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.cryptpad.rule=Host(`cryptpad.${BASE_DOMAIN}`)"
+      - "traefik.http.routers.cryptpad-sandbox.rule=Host(`sandbox.cryptpad.${BASE_DOMAIN}`)"
+      - "traefik.http.routers.cryptpad.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.cryptpad-sandbox.tls.certresolver=letsencrypt"
+      - "traefik.http.services.cryptpad.loadbalancer.server.port=80"
+      - "traefik.http.routers.cryptpad-sandbox.service=cryptpad"
+      - "traefik.http.routers.cryptpad.service=cryptpad"
+
+  drawio:
+    <<: *service-defaults
+    image: jgraph/drawio:${DRAWIO_IMAGE_TAG:-latest}
+    container_name: drawio
+    environment:
+      - PUBLIC_DNS=drawio.${CLOUD_HOST}
+      - DRAWIO_BASE_URL=https://drawio.${CLOUD_HOST}
+      - DRAWIO_GOOGLE_CLIENT_ID=${DRAWIO_GOOGLE_CLIENT_ID}
+      - DRAWIO_GOOGLE_CLIENT_SECRET=${DRAWIO_GOOGLE_CLIENT_SECRET}
+      - DRAWIO_GOOGLE_APP_ID=${DRAWIO_GOOGLE_APP_ID}
+      - ORGANISATION_UNIT=unit
+      - ORGANISATION=org
+      - CITY=city
+      - STATE=state
+      - COUNTRY_CODE=country
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.drawio.rule=Host(`drawio.${CLOUD_HOST}`)"
+      - "traefik.http.routers.drawio.tls.certresolver=letsencrypt"
+      - "traefik.http.services.drawio.loadbalancer.server.port=8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
+
+  vdirsyncer:
+    <<: *service-defaults
+    image: registry.${CLOUD_HOST}/vdirsyncer:${VDIRSYNCER_IMAGE_TAG:-0.19.0}
+    container_name: vdirsyncer
+    security_opt:
+      - no-new-privileges:false
+    environment:
+      TZ: Etc/UTC
+      AUTODISCOVER: false
+      AUTOSYNC: true
+      LOG: /vdirsyncer/vdirsyncer.log
+      CRON_TIME: "*/1 * * * *"   # defaults to */15  - every 15 minutes
+    volumes:
+      - ${APPDATA_DIR}/vdirsyncer:/vdirsyncer

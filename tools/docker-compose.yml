@@ -1,0 +1,620 @@
+---
+version: "3.9"
+
+networks:
+  default:
+    external: true
+    name: tools-net
+  tor-net:
+    external: true
+    name: tor-net
+  devops-net:
+    external: true
+    name: devops-net
+  infra-net:
+    external: true
+    name: infra-net
+
+volumes:
+  send-redis:
+  shhh-postgres:
+  diskover-web:
+    name: diskover-web
+    external: true
+
+x-env: &default-tz-puid-pgid
+  TZ: Etc/UTC
+  PUID: 1000
+  PGID: 1000
+
+x-defaults: &service-defaults
+  networks:
+    - default
+  security_opt:
+    - no-new-privileges:true
+  restart: unless-stopped
+
+services:
+
+  cloud-c2:
+    <<: *service-defaults
+    image: registry.${CLOUD_HOST}/cloud-c2:${CLOUD_C2_IMAGE_TAG:-3.2}
+    container_name: cloud-c2
+    environment:
+      - TZ=Etc/UTC
+      #- DNS_PUBLIC=tcp
+    volumes:
+      - ${APPDATA_DIR}/c2:/config
+    entrypoint:
+      - ./cloud-c2
+      - -hostname=c2.${BASE_DOMAIN}
+      - -https
+      - -reverseProxy
+      - -reverseProxyPort=443
+      - -db=/config/c2.db
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.c2.rule=Host(`c2.${BASE_DOMAIN}`)"
+      - "traefik.http.routers.c2.tls.certresolver=letsencrypt"
+      - "traefik.http.services.c2.loadbalancer.server.port=8080"
+      - "traefik.tcp.routers.c2-ssh.rule=HostSNI(`*`)"
+      - "traefik.tcp.routers.c2-ssh.entrypoints=ssh-c2"
+      - "traefik.tcp.services.c2-ssh.loadbalancer.server.port=2022"
+
+  send:
+    <<: *service-defaults
+    image: registry.gitlab.com/timvisee/send:${SEND_IMAGE_TAG:-latest}
+    container_name: send
+    volumes:
+      - ${APPDATA_DIR}/send/uploads:/uploads
+    environment:
+      - VIRTUAL_HOST=send.${CLOUD_HOST}
+      - VIRTUAL_PORT=1234
+      - DHPARAM_GENERATION=false
+      - NODE_ENV=production
+      - BASE_URL=https://send.${CLOUD_HOST}
+      - PORT=1234
+      - REDIS_HOST=send-redis
+      - FILE_DIR=/uploads
+      - EXPIRE_TIMES_SECONDS=3600,86400,604800,2592000
+      - DEFAULT_EXPIRE_SECONDS=3600
+      - MAX_EXPIRE_SECONDS=31536000
+      - DOWNLOAD_COUNTS=1,2,5,10,15,25,50,100
+      - MAX_DOWNLOADS=100
+      - MAX_FILE_SIZE=1284354560
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.send.rule=Host(`send.${CLOUD_HOST}`)"
+      - "traefik.http.routers.send.tls.certresolver=letsencrypt"
+      - "traefik.http.services.send.loadbalancer.server.port=1234"
+  
+  send-redis:
+    <<: *service-defaults
+    image: "redis:alpine"
+    container_name: send-redis
+    volumes:
+      - send-redis:/data
+
+  goatcounter:
+    <<: *service-defaults
+    image: registry.${CLOUD_HOST}/goatcounter:${GOATCOUNTER_IMAGE_TAG:-v2.2.3}
+    container_name: goatcounter
+    environment:
+      GOATCOUNTER_DOMAIN: goat.${CLOUD_HOST}
+      GOATCOUNTER_EMAIL: ${GOATCOUNTER_EMAIL}
+      GOATCOUNTER_PASSWORD: ${GOATCOUNTER_PASSWORD}
+      GOATCOUNTER_SMTP: ${GOATCOUNTER_SMTP}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.stats.rule=Host(`goat.${CLOUD_HOST}`)"
+      - "traefik.http.routers.stats.tls.certresolver=letsencrypt"
+      - "traefik.http.services.stats.loadbalancer.server.port=8080"
+
+  shhh:
+    <<: *service-defaults
+    image: registry.${CLOUD_HOST}/shhh:${SHHH_IMAGE_TAG:-2.5.2}
+    container_name: shhh
+    depends_on:
+      - shhh-db
+    environment:
+      - POSTGRES_HOST=shhh-db
+      - POSTGRES_USER=shhh
+      - POSTGRES_PASSWORD=${SHHH_POSTGRES_PASSWORD}
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=shhh
+      - FLASK_ENV=production
+      - SHHH_HOST=https://shhh.${CLOUD_HOST}
+      - SHHH_SECRET_MAX_LENGTH=1000
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.shhh.rule=Host(`shhh.${CLOUD_HOST}`)"
+      - "traefik.http.routers.shhh.tls.certresolver=letsencrypt"
+      - "traefik.http.services.shhh.loadbalancer.server.port=5000"
+  
+  shhh-db:
+    <<: *service-defaults
+    image: postgres:13.2-alpine
+    container_name: shhh-db
+    environment:
+      - PGDATA=/data/postgres
+      - POSTGRES_HOST=shhh-db
+      - POSTGRES_USER=shhh
+      - POSTGRES_PASSWORD=${SHHH_POSTGRES_PASSWORD}
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=shhh
+    volumes:
+      #- /tmp/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - shhh-postgres:/data/postgres
+
+  searxng:
+    <<: *service-defaults
+    image: searxng/searxng:${SEARX_IMAGE_TAG:-latest}
+    container_name: searxng
+    command: ${SEARXNG_COMMAND:-}
+    volumes:
+      - ${APPDATA_DIR}/searx:/etc/searxng:rw
+    environment:
+      - BIND_ADDRESS=0.0.0.0:7070
+      - BASE_URL=https://searx.${CLOUD_HOST}
+      - MORTY_URL=https://morty.${CLOUD_HOST}
+      - MORTY_KEY=${MORTY_KEY}
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
+    networks:
+      - default
+      - tor-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=tools-net"
+      - "traefik.http.routers.searx.rule=Host(`searx.${CLOUD_HOST}`)"
+      - "traefik.http.routers.searx.tls.certresolver=letsencrypt"
+      - "traefik.http.services.searx.loadbalancer.server.port=7070"
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  morty:
+    <<: *service-defaults
+    image: spcodes/morty
+    container_name: morty
+    command: -timeout 6 -ipv6
+    environment:
+      - MORTY_KEY=${MORTY_KEY}
+      - MORTY_ADDRESS=0.0.0.0:4040
+      - DEBUG=false
+    logging:
+      driver: none
+    read_only: true
+    cap_drop:
+      - ALL
+    links:
+      - searxng
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.morty.rule=Host(`morty.${CLOUD_HOST}`)"
+      - "traefik.http.routers.morty.tls.certresolver=letsencrypt"
+      - "traefik.http.services.morty.loadbalancer.server.port=4040"
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  whoogle:
+    <<: *service-defaults
+    image: benbusby/whoogle-search:${WHOOGLE_IMAGE_TAG:-latest}
+    container_name: whoogle
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.whoogle.rule=Host(`whoogle.${CLOUD_HOST}`)"
+      - "traefik.http.routers.whoogle.tls.certresolver=letsencrypt"
+      - "traefik.http.services.whoogle.loadbalancer.server.port=5000"
+
+  homeassistant:
+    <<: *service-defaults
+    image: homeassistant/home-assistant:${HOME_ASSISTANT_IMAGE_TAG:-stable}
+    container_name: homeassistant
+    volumes:
+      - ${APPDATA_DIR}/home-assistant:/config
+      - /etc/localtime:/etc/localtime:ro
+    environment:
+      <<: *default-tz-puid-pgid
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8123"]
+      interval: 2m
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.homeassistant.rule=Host(`home-assistant.${BASE_DOMAIN}`)"
+      - "traefik.http.routers.homeassistant.tls.certresolver=letsencrypt"
+      - "traefik.http.services.homeassistant.loadbalancer.server.port=8123"
+
+  privatebin:
+    <<: *service-defaults
+    image: privatebin/nginx-fpm-alpine:${PRIVATEBIN_IMAGE_TAG:-latest}
+    container_name: privatebin
+    volumes:
+      - ${APPDATA_DIR}/privatebin:/srv/data
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.privatebin.rule=Host(`privatebin.${CLOUD_HOST}`)"
+      - "traefik.http.routers.privatebin.tls.certresolver=letsencrypt"
+      - "traefik.http.services.privatebin.loadbalancer.server.port=8080"
+
+  homer:
+    <<: *service-defaults
+    image: b4bz/homer:${HOMER_IMAGE_TAG:-latest}
+    container_name: homer
+    environment:
+      <<: *default-tz-puid-pgid
+    volumes:
+      - ${APPDATA_DIR}/homer:/www/assets
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.homer.rule=Host(`homer.${CLOUD_HOST}`)"
+      - "traefik.http.routers.homer.tls.certresolver=letsencrypt"
+      - "traefik.http.services.homer.loadbalancer.server.port=8080"
+      - "traefik.http.routers.homer.middlewares=authelia@file"
+
+  librespeed:
+    <<: *service-defaults
+    image: lscr.io/linuxserver/librespeed:${LIBRESPEED_IMAGE_TAG:-latest}
+    container_name: librespeed
+    environment:
+      <<: *default-tz-puid-pgid
+      PASSWORD: ${LIBRESPEED_DB_PASSWORD}
+      CUSTOM_RESULTS: false #optional
+      DB_TYPE: sqlite #optional
+    #  - DB_NAME=librespeed #optional
+    #  - DB_HOSTNAME=DB_HOSTNAME #optional
+    #  - DB_USERNAME=DB_USERNAME #optional
+    #  - DB_PASSWORD=DB_PASSWORD #optional
+    #  - DB_PORT=DB_PORT #optional
+    #volumes:
+    #  - /path/to/appdata/config:/config
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.librespeed.rule=Host(`speedtest.${CLOUD_HOST}`)"
+      - "traefik.http.routers.librespeed.tls.certresolver=letsencrypt"
+      - "traefik.http.services.librespeed.loadbalancer.server.port=80"
+
+  maxmind-geoipupdate:
+    <<: *service-defaults
+    image: tkrs/maxmind-geoipupdate
+    container_name: maxmind-geoipupdate
+    environment:
+      - ACCOUNT_ID=${MAXMIND_ACCOUNT_ID}
+      - LICENSE_KEY=${MAXMIND_LICENSE_KEY}
+      - GEOIP_DB_DIR=/data/GeoIP
+    volumes:
+      - ${APPDATA_DIR}/maxmind-geoip:/data/GeoIP:z
+
+  #-------------------------------------------------------------------------------------
+
+  syncthing:
+    <<: *service-defaults
+    image: syncthing/syncthing:${SYNCTHING_IMAGE_TAG:-latest}
+    container_name: syncthing
+    hostname: syncthing-optimus
+    environment:
+      - PUID=0
+      - PGID=0
+    volumes:
+      - ${APPDATA_DIR}/syncthing:/var/syncthing
+      - ${APPDATA_DIR}/plexxx:/sync/docker/appdata/plexxx
+      - ${APPDATA_DIR}/xbvr:/sync/docker/appdata/xbvr
+      - ${APPDATA_DIR}/homer:/sync/docker/appdata/homer
+    ports:
+      - 22000:22000/tcp # TCP file transfers
+      - 22000:22000/udp # QUIC file transfers
+    cap_add:
+      - CAP_CHOWN
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.syncthing.rule=Host(`syncthing.${CLOUD_HOST}`)"
+      - "traefik.http.routers.syncthing.tls.certresolver=letsencrypt"
+      - "traefik.http.services.syncthing.loadbalancer.server.port=8384"
+      - "traefik.http.routers.syncthing.middlewares=authelia@file"
+
+  mosquitto:
+    <<: *service-defaults
+    image: eclipse-mosquitto:${MOSQUITTO_IMAGE_TAG:-latest}
+    container_name: mosquitto
+    volumes:
+      - ${APPDATA_DIR}/mosquitto/config:/mosquitto/config
+      - ${APPDATA_DIR}/mosquitto/data:/mosquitto/data
+    ports:
+      - 1883:1883
+      - 9001:9001
+
+  minio:
+    <<: *service-defaults
+    image: minio/minio:${MINIO_IMAGE_TAG:-latest}
+    container_name: minio
+    command: server --console-address ":9001" /data
+    depends_on:
+      - minio-kes
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_SERVER_URL: https://minio.${CLOUD_HOST}
+      MINIO_BROWSER_REDIRECT_URL: https://minio-console.${CLOUD_HOST}
+      MINIO_KMS_KES_ENDPOINT: https://minio-kes:7373
+      MINIO_KMS_KES_CERT_FILE: /certs/cert.pem
+      MINIO_KMS_KES_KEY_FILE: /certs/key.pem
+      MINIO_KMS_KES_KEY_NAME: minio-backend-default-key
+      MINIO_KMS_KES_CAPATH: ${MINIO_KMS_KES_CAPATH}
+      MINIO_PROMETHEUS_URL: http://prometheus:9090
+    healthcheck:
+      test: curl -f http://localhost:9000/minio/health/live &>/dev/null && ls /data/.mount &>/dev/null && true || false
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    volumes:
+      - ${CERTS_DIR}/minio:/certs:ro
+      - /mnt/asgard-root/minio:/data
+    networks:
+      - default
+      - infra-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.minio.rule=Host(`minio.${CLOUD_HOST}`)"
+      - "traefik.http.routers.minio.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.minio.service=minio"
+      - "traefik.http.services.minio.loadbalancer.server.port=9000"
+      - "traefik.http.routers.minio-console.rule=Host(`minio-console.${CLOUD_HOST}`)"
+      - "traefik.http.routers.minio-console.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.minio-console.service=minio-console"
+      - "traefik.http.services.minio-console.loadbalancer.server.port=9001"
+
+  minio-kes:
+    <<: *service-defaults
+    image: minio/kes:${MINIO_KES_IMAGE_TAG:-latest}
+    container_name: minio-kes
+    command: server --config /data/config.yml --auth off --mlock
+    environment:
+      - KES_SERVER=https://127.0.0.1:7373
+      - KES_CLIENT_KEY=/certs/minio/key.pem
+      - KES_CLIENT_CERT=/certs/minio/cert.pem
+    cap_add:
+      - IPC_LOCK
+    volumes:
+      - ${APPDATA_DIR}/minio-kes:/data
+      - ${CERTS_DIR}/minio:/certs/minio:ro
+      - ${CERTS_DIR}/minio-kes:/certs/minio-kes:ro
+    networks:
+      - default
+      - devops-net
+
+  diskover-indexer:
+    <<: *service-defaults
+    image: registry.${CLOUD_HOST}/diskover-indexer:${DISKOVER_IMAGE_TAG:-2}
+    container_name: diskover-indexer
+    mem_limit: 2048m
+    environment:
+      - DISKOVERD_WORKERNAME="optimus-worker"
+    volumes:
+      - ${APPDATA_DIR}/diskover/indexer:/root/.config
+      - ${LOGS_DIR}/diskover:/var/log
+      - /mnt/${X}:/${X}:ro
+      - /mnt/media:/media:ro
+
+  diskover-web:
+    <<: *service-defaults
+    image: registry.${CLOUD_HOST}/diskover-web:${DISKOVER_IMAGE_TAG:-2}
+    container_name: diskover-web
+    mem_limit: 2048m
+    volumes:
+      - diskover-web:/app
+      - ${APPDATA_DIR}/diskover/web/nginx-php.conf:/opt/docker/etc/nginx/vhost.common.d/10-php.conf:ro
+      - ${APPDATA_DIR}/diskover/web/Constants.php:/app/src/diskover/Constants.php:ro
+    environment:
+      - PHP_DISPLAY_ERRORS=1
+      - PHP_MEMORY_LIMIT=2048M
+      - COMPOSER_VENDOR_DIR=/app/vendor
+      - WEB_DOCUMENT_ROOT=/app/public
+      - WEB_ALIAS_DOMAIN=diskover.${CLOUD_HOST}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.diskover.rule=Host(`diskover.${CLOUD_HOST}`)"
+      - "traefik.http.routers.diskover.tls.certResolver=letsencrypt"
+      - "traefik.http.services.diskover.loadbalancer.server.port=80"
+      - "traefik.http.middlewares.nginx-http-headers.headers.customrequestheaders.X-Forwarded-Proto=http"
+      - "traefik.http.routers.diskover.middlewares=authelia@file,nginx-http-headers"
+
+  fx-syncserver:
+    <<: *service-defaults
+    image: mozilla/syncserver:${FX_SYNCSERVER_IMAGE_TAG:-latest}
+    container_name: fx-syncserver
+    volumes:
+      - ${APPDATA_DIR}/fx-syncserver:/data
+    environment:
+      SYNCSERVER_SQLURI: sqlite:////data/syncserver.db
+      SYNCSERVER_SECRET: ${FX_SYNCSERVER_SECRET}
+      SYNCSERVER_PUBLIC_URL: https://fx-sync.${CLOUD_HOST}
+      SYNCSERVER_FORCE_WSGI_ENVIRON: "true"
+      SYNCSERVER_DEBUG_ENABLED: "false"
+      SYNCSERVER_BATCH_UPLOAD_ENABLED: "true"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.fx-syncserver.rule=Host(`fx-sync.${CLOUD_HOST}`)"
+      - "traefik.http.routers.fx-syncserver.tls.certresolver=letsencrypt"
+      - "traefik.http.services.fx-syncserver.loadbalancer.server.port=5000"
+
+  #----------------------------------------------------------------
+
+  expanse:
+    <<: *service-defaults
+    image: registry.${CLOUD_HOST}/expanse:${EXPANSE_IMAGE_TAG:-22.09}
+    container_name: expanse
+    depends_on:
+      - expanse-db
+    environment:
+      - RUN=prod
+      - PORT=1301
+      - VERSION=1.0.0
+      - POSTGRES_DB=expanse
+      - POSTGRES_HOST=expanse-db
+      - POSTGRES_USER=pg
+      - POSTGRES_PASSWORD=${EXPANSE_DB_PASSWORD}
+      - REDDIT_APP_REDIRECT=https://expanse.${CLOUD_HOST}/callback
+      - REDDIT_USERNAME=${EXPANSE_REDDIT_USERNAME}
+      - REDDIT_APP_ID=${EXPANSE_REDDIT_APP_ID}
+      - REDDIT_APP_SECRET=${EXPANSE_REDDIT_APP_SECRET}
+      - ALLOWED_USERS=${EXPANSE_ALLOWED_USERS}
+      - DENIED_USERS=${EXPANSE_DENIED_USERS}
+      - SESSION_SECRET=${EXPANSE_SESSION_SECRET}
+      - ENCRYPTION_KEY=${EXPANSE_ENCRYPTION_KEY}
+    entrypoint: []
+    command: sh -c 'wait-for-it expanse-db:5432 -t 0 && npm run prod'
+    volumes:
+      - ${APPDATA_DIR}/expanse/backups:/backend/backups
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.expanse.rule=Host(`expanse.${CLOUD_HOST}`)"
+      - "traefik.http.routers.expanse.tls.certresolver=letsencrypt"
+      - "traefik.http.services.expanse.loadbalancer.server.port=1301"
+
+  expanse-db:
+    <<: *service-defaults
+    image: postgres:14
+    container_name: expanse-db
+    volumes:
+      - ${APPDATA_DIR}/expanse/db:/var/lib/postgresql
+      - ${APPDATA_DIR}/expanse/db/data:/var/lib/postgresql/data
+      - ${APPDATA_DIR}/expanse/backups:/backups
+    environment:
+      - POSTGRES_DB=expanse
+      - POSTGRES_USER=pg
+      - POSTGRES_PASSWORD=${EXPANSE_DB_PASSWORD}
+
+  # ----------------------------------------------------------------
+
+  changedetection:
+    <<: *service-defaults
+    image: ghcr.io/dgtlmoon/changedetection.io:${CHANGE_DETECTION_IMAGE_TAG:-latest}
+    container_name: changedetection
+    hostname: changedetection
+    depends_on:
+      - browser-chrome
+      - playwright-chrome
+    environment:
+      - PORT=5000
+      - PUID=1000
+      - PGID=1000
+      - BASE_URL=https://changedetection.${CLOUD_HOST}
+      - USE_X_SETTINGS=1
+      - WEBDRIVER_URL=http://browser-chrome:4444/wd/hub
+      - PLAYWRIGHT_DRIVER_URL=ws://playwright-chrome:3000/?stealth=1&--disable-web-security=true
+      # - HIDE_REFERER=true
+      #- HTTP_PROXY=socks5h://10.10.1.10:1080
+      #- HTTPS_PROXY=socks5h://10.10.1.10:1080
+    volumes:
+      - ${APPDATA_DIR}/changedetection:/datastore
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.changedetection.rule=Host(`changedetection.${CLOUD_HOST}`)"
+      - "traefik.http.routers.changedetection.tls.certresolver=letsencrypt"
+      - "traefik.http.services.changedetection.loadbalancer.server.port=5000"
+      - "traefik.http.routers.changedetection.middlewares=authelia@file"
+
+  browser-chrome:
+    <<: *service-defaults
+    image: selenium/standalone-chrome-debug:${SELENIUM_IMAGE_TAG:-3.141.59}
+    container_name: browser-chrome
+    hostname: browser-chrome
+    environment:
+      - VNC_NO_PASSWORD=1
+      - SCREEN_WIDTH=1920
+      - SCREEN_HEIGHT=1080
+      - SCREEN_DEPTH=24
+    volumes:
+      # Workaround to avoid the browser crashing inside a docker container
+      # See https://github.com/SeleniumHQ/docker-selenium#quick-start
+      - /dev/shm:/dev/shm
+
+  playwright-chrome:
+    <<: *service-defaults
+    image: browserless/chrome:${CHROME_IMAGE_TAG:-latest}
+    container_name: playwright-chrome
+    hostname: playwright-chrome
+    environment:
+      - SCREEN_WIDTH=1920
+      - SCREEN_HEIGHT=1024
+      - SCREEN_DEPTH=16
+      - ENABLE_DEBUGGER=false
+      - PREBOOT_CHROME=true
+      - CONNECTION_TIMEOUT=300000
+      - MAX_CONCURRENT_SESSIONS=10
+      - CHROME_REFRESH_TIME=600000
+      - DEFAULT_BLOCK_ADS=true
+      - DEFAULT_STEALTH=true
+    mem_limit: 500M
+
+  huginn:
+    <<: *service-defaults
+    image: huginn/huginn:${HUGINN_IMAGE_TAG:-latest}
+    container_name: huginn
+    environment:
+      - DOMAIN=huginn.${CLOUD_HOST}
+      - DATABASE_NAME=huginn
+      - DATABASE_USERNAME=root
+      - DATABASE_PASSWORD=${HUGINN_DATABASE_PASSWORD}
+      - INVITATION_CODE=${HUGINN_INVITATION_CODE}
+      - APP_SECRET_TOKEN=${HUGINN_APP_SECRET_TOKEN}
+    volumes:
+      - ${APPDATA_DIR}/huginn:/var/lib/mysql
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.huginn.rule=Host(`huginn.${CLOUD_HOST}`)"
+      - "traefik.http.routers.huginn.tls.certresolver=letsencrypt"
+      - "traefik.http.services.huginn.loadbalancer.server.port=3000"
+
+  phoneinfoga:
+    <<: *service-defaults
+    image: sundowndev/phoneinfoga:${PHONEINFOGA_IMAGE_TAG:-latest}
+    container_name: phoneinfoga
+    command:
+      - "serve"
+    environment:
+      - NUMVERIFY_API_KEY=${NUMVERIFY_API_KEY}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.phoneinfoga.rule=Host(`phoneinfoga.${CLOUD_HOST}`)"
+      - "traefik.http.routers.phoneinfoga.tls.certresolver=letsencrypt"
+      - "traefik.http.services.phoneinfoga.loadbalancer.server.port=5000"
+      - "traefik.http.routers.phoneinfoga.middlewares=authelia@file"
+
+  cyberchef:
+    <<: *service-defaults
+    image: registry.${CLOUD_HOST}/cyberchef:${CYBERCHEF_IMAGE_TAG:-v9.39.1}
+    container_name: cyberchef
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.cyberchef.rule=Host(`cyberchef.${CLOUD_HOST}`)"
+      - "traefik.http.routers.cyberchef.tls.certresolver=letsencrypt"
+      - "traefik.http.services.cyberchef.loadbalancer.server.port=8000"
+      - "traefik.http.routers.cyberchef.middlewares=authelia@file"
+
+  samba:
+    <<: *service-defaults
+    image: dperson/samba:${SAMBA_IMAGE_TAG:-latest}
+    container_name: samba
+    environment:
+      PERMISSIONS: true
+      USER1: local-user;${SAMBA_LOCAL_USER_PWD}
+      SHARE1: vulcan-dind-certs;/shares/vulcan-dind-certs;no;no;no;local-user;none;local-user;
+      SHARE2: jenkins-home;/shares/jenkins-home;no;no;no;local-user;none;local-user;  #<share_name;path>[;browsable;readonly;guest;allowed_users<[all,none,[user,user2,...]]>;admins;write_users;comment]
+      # USER2: public-user;${SAMBA_USER2_PWD}
+      # SHARE3: public;/shares/public;no;yes;no;public_user;none;public_user  #<share_name;path>[;browsable;readonly;guest;allowed_users<[all,none,[user,user2,...]]>;admins;write_users;comment]
+      # INCLUDE: /config/smb.conf
+    ports:
+      - 445:445
+      - 139:139
+    volumes:
+      - ${APPDATA_DIR}/samba/config:/config
+      - ${APPDATA_DIR}/samba/logs:/var/log/samba
+      - ${APPDATA_DIR}/jenkins:/shares/jenkins-home:z
+      - ${CERTS_DIR}/vulcan-dind-certs:/shares/vulcan-dind-certs:z
+      # - ${APPDATA_DIR}/samba/shares:/shares:z

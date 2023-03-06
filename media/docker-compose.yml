@@ -1,0 +1,553 @@
+---
+version: "3.9"
+
+networks:
+  default:
+    name: media-net
+    external: true
+  proxy-net:
+    name: proxy-net
+    external: true
+  tor-net:
+    external: true
+    name: tor-net
+
+x-env: &default-tz-puid-pgid
+  TZ: Etc/UTC
+  PUID: 1000
+  PGID: 1000
+  USER_ID: 1000
+  GROUP_ID: 1000
+  UMASK: "0022"
+  UMASK_SET: "0022"
+
+x-defaults: &service-defaults
+  networks:
+    - default
+  security_opt:
+    - no-new-privileges:true
+  restart: unless-stopped
+  # profiles:
+  # - media
+
+x-healthcheck-opts: &default-healthcheck-opts
+  interval: 20s
+  timeout: 10s
+  retries: 2
+
+# ----------------------------------------------------------------------------------------------------------------------------------
+services:
+  # -------------------------------------------------------- MEDIA MANAGEMENT --------------------------------------------------------
+
+  plex:
+    <<: *service-defaults
+    image: lscr.io/linuxserver/plex:${PLEX_IMAGE_TAG:-latest}
+    container_name: plex
+    environment:
+      <<: *default-tz-puid-pgid
+      VERSION: docker
+      PLEX_CLAIM: ${PLEX_CLAIM}
+      PMS_ROOT: ${PMS_ROOT}
+    healthcheck:
+      <<: *default-healthcheck-opts
+      test: /bin/bash -c 'ls "${PMS_ROOT}/Media/.mount" "${PMS_ROOT}/Metadata/.mount" /mnt/media/.rclonemount &>/dev/null && true || false'
+    volumes:
+      - ${APPDATA_DIR}/plex:${PMS_ROOT}
+      - ${REMOTE_APPDATA_DIR}/plex/Media:${PMS_ROOT}/Media
+      - ${REMOTE_APPDATA_DIR}/plex/Metadata:${PMS_ROOT}/Metadata
+      - /mnt/ephemeral/cache/plex:${PMS_ROOT}/Cache
+      - /mnt/media:/mnt/media
+      - /mnt/media-library:/mnt/media-library
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.plex.rule=Host(`plex.${CLOUD_HOST}`)"
+      - "traefik.http.routers.plex.tls.certresolver=letsencrypt"
+      - "traefik.http.services.plex.loadbalancer.server.port=32400"
+      - "traefik.http.routers.plex.service=plex"
+      - "traefik.http.routers.plex-webtools.rule=Host(`plex-webtools.${CLOUD_HOST}`)"
+      - "traefik.http.routers.plex-webtools.tls.certresolver=letsencrypt"
+      - "traefik.http.services.plex-webtools.loadbalancer.server.port=33400"
+      - "traefik.http.routers.plex-webtools.service=plex-webtools"
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  tautulli:
+    <<: *service-defaults
+    image: lscr.io/linuxserver/tautulli:${TAUTULLI_IMAGE_TAG:-latest}
+    container_name: tautulli
+    environment:
+      <<: *default-tz-puid-pgid
+    volumes:
+      - ${APPDATA_DIR}/tautulli:/config
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.tautulli.rule=Host(`tautulli.${CLOUD_HOST}`)"
+      - "traefik.http.routers.tautulli.tls.certresolver=letsencrypt"
+      - "traefik.http.services.tautulli.loadbalancer.server.port=8181"
+      - "traefik.http.routers.tautulli.service=tautulli"
+
+  varken:
+    <<: *service-defaults
+    image: boerderij/varken:${VARKEN_IMAGE_TAG:-latest}
+    container_name: varken
+    volumes:
+      - ${APPDATA_DIR}/varken:/config
+    environment:
+      <<: *default-tz-puid-pgid
+      VRKN_GLOBAL_MAXMIND_LICENSE_KEY: ${VRKN_GLOBAL_MAXMIND_LICENSE_KEY}
+      VRKN_INFLUXDB_URL: influxdb.${CLOUD_HOST}
+      VRKN_INFLUXDB_PORT: 443
+      VRKN_INFLUXDB_SSL: true
+      VRKN_INFLUXDB_VERIFY_SSL: true
+      VRKN_INFLUXDB_USERNAME: ${VRKN_INFLUXDB_USERNAME}
+      VRKN_INFLUXDB_PASSWORD: ${VRKN_INFLUXDB_PASSWORD}
+      VRKN_GLOBAL_SONARR_SERVER_IDS: 1
+      VRKN_GLOBAL_RADARR_SERVER_IDS: 1
+      VRKN_GLOBAL_LIDARR_SERVER_IDS: 1
+      VRKN_GLOBAL_TAUTULLI_SERVER_IDS: 1,2
+      VRKN_TAUTULLI_1_URL: tautulli:8181
+      VRKN_TAUTULLI_1_FALLBACK_IP: 1.1.1.1
+      VRKN_TAUTULLI_1_APIKEY: ${VRKN_TAUTULLI_2_APIKEY}
+      VRKN_TAUTULLI_1_SSL: false
+      VRKN_TAUTULLI_1_VERIFY_SSL: false
+      VRKN_TAUTULLI_1_GET_ACTIVITY: true
+      VRKN_TAUTULLI_1_GET_ACTIVITY_RUN_SECONDS: 30
+      VRKN_TAUTULLI_1_GET_STATS: true
+      VRKN_TAUTULLI_1_GET_STATS_RUN_SECONDS: 3600
+      VRKN_TAUTULLI_2_URL: tautulli-${X}:8181
+      VRKN_TAUTULLI_2_FALLBACK_IP: 1.1.1.1
+      VRKN_TAUTULLI_2_APIKEY: ${VRKN_TAUTULLI_2_APIKEY}
+      VRKN_TAUTULLI_2_SSL: false
+      VRKN_TAUTULLI_2_VERIFY_SSL: false
+      VRKN_TAUTULLI_2_GET_ACTIVITY: true
+      VRKN_TAUTULLI_2_GET_ACTIVITY_RUN_SECONDS: 30
+      VRKN_TAUTULLI_2_GET_STATS: true
+      VRKN_TAUTULLI_2_GET_STATS_RUN_SECONDS: 3600
+      VRKN_SONARR_1_URL: sonarr
+      VRKN_SONARR_1_APIKEY: ${VRKN_SONARR_1_APIKEY}
+      VRKN_SONARR_1_SSL: false
+      VRKN_SONARR_1_VERIFY_SSL: false
+      VRKN_SONARR_1_MISSING_DAYS: 7
+      VRKN_SONARR_1_MISSING_DAYS_RUN_SECONDS: 300
+      VRKN_SONARR_1_FUTURE_DAYS: 1
+      VRKN_SONARR_1_FUTURE_DAYS_RUN_SECONDS: 300
+      VRKN_SONARR_1_QUEUE: true
+      VRKN_SONARR_1_QUEUE_RUN_SECONDS: 300
+      VRKN_RADARR_1_URL: radarr
+      VRKN_RADARR_1_APIKEY: ${VRKN_RADARR_1_APIKEY}
+      VRKN_RADARR_1_SSL: false
+      VRKN_RADARR_1_VERIFY_SSL: false
+      VRKN_RADARR_1_QUEUE: true
+      VRKN_RADARR_1_QUEUE_RUN_SECONDS: 300
+      VRKN_RADARR_1_GET_MISSING: true
+      VRKN_RADARR_1_GET_MISSING_RUN_SECONDS: 300
+      VRKN_LIDARR_1_URL: lidarr
+      VRKN_LIDARR_1_APIKEY: ${VRKN_LIDARR_1_APIKEY}
+      VRKN_LIDARR_1_SSL: false
+      VRKN_LIDARR_1_VERIFY_SSL: false
+      VRKN_LIDARR_1_MISSING_DAYS: 30
+      VRKN_LIDARR_1_MISSING_DAYS_RUN_SECONDS: 300
+      VRKN_LIDARR_1_FUTURE_DAYS: 30
+      VRKN_LIDARR_1_FUTURE_DAYS_RUN_SECONDS: 300
+      VRKN_LIDARR_1_QUEUE: true
+      VRKN_LIDARR_1_QUEUE_RUN_SECONDS: 300
+
+  # --------------------------------------------------------------------------------------
+
+  invidious:
+    <<: *service-defaults
+    image: quay.io/invidious/invidious:${INVIDIOUS_IMAGE_TAG:-latest}
+    container_name: invidious
+    mem_limit: 2048M
+    cpus: 2
+    environment:
+      INVIDIOUS_CONFIG: |
+        channel_threads: 2
+        check_tables: true
+        feed_threads: 2
+        db:
+          dbname: kemal
+          user: kemal
+          password: ${INVIDIOUS_DB_PASSWORD}
+          host: invidious-db
+          port: 5432
+        full_refresh: false
+        https_only: true
+        domain: invidious.${CLOUD_HOST}
+        external_port: 443
+        captcha_api_url: https://www.9kw.eu/index.cgi
+        captcha_key: ${INVIDIOUS_CAPTCHA_KEY}
+    depends_on:
+      - invidious-db
+    networks:
+      - default
+      - tor-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=media-net"
+      - "traefik.http.routers.invidious.rule=Host(`invidious.${CLOUD_HOST}`)"
+      - "traefik.http.routers.invidious.tls.certresolver=letsencrypt"
+      - "traefik.http.services.invidious.loadbalancer.server.port=3000"
+      #- 'traefik.http.routers.invidious.middlewares=authelia@file'
+
+  invidious-db:
+    <<: *service-defaults
+    image: postgres:10
+    container_name: invidious-db
+    volumes:
+      - ${APPDATA_DIR}/invidious/data:/var/lib/postgresql/data
+      - ${APPDATA_DIR}/invidious/config/sql:/config/sql
+      - ${APPDATA_DIR}/invidious/docker/init-invidious-db.sh:/docker-entrypoint-initdb.d/init-invidious-db.sh
+    environment:
+      POSTGRES_DB: kemal
+      POSTGRES_USER: kemal
+      POSTGRES_PASSWORD: ${INVIDIOUS_DB_PASSWORD}
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+
+  # --------------------------------------------------------------------------------------
+
+  your-spotify-api:
+    <<: *service-defaults
+    image: yooooomi/your_spotify_server:${YOUR_SPOTIFY_SERVER_IMAGE_TAG:-latest}
+    container_name: your-spotify-api
+    depends_on:
+      - your-spotify-db
+    environment:
+      - API_ENDPOINT=https://spotify-api.${CLOUD_HOST}
+      - CLIENT_ENDPOINT=https://spotify.${CLOUD_HOST}
+      - SPOTIFY_PUBLIC=${SPOTIFY_PUBLIC}
+      - SPOTIFY_SECRET=${SPOTIFY_SECRET}
+      - CORS=https://spotify.${CLOUD_HOST}
+      - MONGO_ENDPOINT=mongodb://your-spotify-db:27017/your_spotify
+      - TZ=Etc/UTC
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.spotify-api.rule=Host(`spotify-api.${CLOUD_HOST}`)"
+      - "traefik.http.routers.spotify-api.tls.certresolver=letsencrypt"
+      - "traefik.http.services.spotify-api.loadbalancer.server.port=8080"
+
+  your-spotify-web:
+    <<: *service-defaults
+    image: yooooomi/your_spotify_client:${YOUR_SPOTIFY_CLIENT_IMAGE_TAG:-latest}
+    container_name: your-spotify-web
+    environment:
+      - API_ENDPOINT=https://spotify-api.${CLOUD_HOST}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.spotify.rule=Host(`spotify.${CLOUD_HOST}`)"
+      - "traefik.http.routers.spotify.tls.certresolver=letsencrypt"
+      - "traefik.http.services.spotify.loadbalancer.server.port=3000"
+
+  your-spotify-db:
+    <<: *service-defaults
+    image: mongo:4.4
+    container_name: your-spotify-db
+    volumes:
+      - ${APPDATA_DIR}/spotify:/data/db
+
+  # -------------------------------------------------------- DOWNLOADERS --------------------------------------------------------
+
+  sabnzbd:
+    <<: *service-defaults
+    image: lscr.io/linuxserver/sabnzbd:${SABNZBD_IMAGE_TAG:-latest}
+    container_name: sabnzbd
+    environment:
+      <<: *default-tz-puid-pgid
+    healthcheck:
+      <<: *default-healthcheck-opts
+      test: ls /downloads/.mount /${X}/.rclonemount &>/dev/null && true || false
+    volumes:
+      - ${APPDATA_DIR}/sabnzbd:/config
+      - /mnt/ephemeral/cache:/cache
+      - /mnt/media/downloads:/downloads
+      - /mnt/${X}:/${X}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.sabnzbd.rule=Host(`sabnzbd.${CLOUD_HOST}`)"
+      - "traefik.http.routers.sabnzbd.tls.certresolver=letsencrypt"
+      - "traefik.http.services.sabnzbd.loadbalancer.server.port=8080"
+      - "traefik.http.routers.sabnzbd.middlewares=authelia@file"
+
+  qbittorrent:
+    <<: *service-defaults
+    image: lscr.io/linuxserver/qbittorrent:${QBITTORRENT_IMAGE_TAG:-latest}
+    container_name: qbittorrent
+    environment:
+      <<: *default-tz-puid-pgid
+      DEBUG: false
+      WEBUI_PORT: 8080
+    healthcheck:
+      <<: *default-healthcheck-opts
+      test: ls /downloads/.mount &>/dev/null && true || false
+    volumes:
+      - ${APPDATA_DIR}/qbittorrent:/config
+      - /mnt/ephemeral/incomplete-downloads:/incomplete-downloads
+      - /mnt/media/downloads:/downloads
+      - /etc/localtime:/etc/localtime:ro
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.qbittorrent.rule=Host(`qbittorrent.${CLOUD_HOST}`)"
+      - "traefik.http.routers.qbittorrent.tls.certresolver=letsencrypt"
+      - "traefik.http.services.qbittorrent.loadbalancer.server.port=8080"
+      - "traefik.http.routers.qbittorrent.middlewares=authelia@file"
+
+  jdownloader:
+    <<: *service-defaults
+    image: jlesage/jdownloader-2:${JDOWNLOADER_IMAGE_TAG:-latest}
+    container_name: jdownloader
+    networks:
+      - default
+      - proxy-net
+    mem_limit: 3G
+    environment:
+      VNC_PASSWORD: ${JDOWNLOADER_VNC_PASSWORD}
+      DISPLAY_WIDTH: 1920
+      DISPLAY_HEIGHT: 1080
+    healthcheck:
+      <<: *default-healthcheck-opts
+      test: ls /downloads/.mount &>/dev/null && true || false
+    volumes:
+      - ${APPDATA_DIR}/jdownloader:/config
+      - /mnt/${X}/Downloads/jdownloader:/downloads
+      - /mnt/ephemeral/incomplete-downloads/jdownloader:/incomplete
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=media-net"
+      - "traefik.http.routers.jdownloader.rule=Host(`jdownloader.${CLOUD_HOST}`)"
+      - "traefik.http.routers.jdownloader.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.jdownloader.tls.domains[0].main=${CLOUD_HOST}"
+      - "traefik.http.routers.jdownloader.tls.domains[0].sans=*.${CLOUD_HOST}"
+      - "traefik.http.services.jdownloader.loadbalancer.server.port=5800"
+      - "traefik.http.routers.jdownloader.middlewares=authelia@file"
+
+  tubesync:
+    <<: *service-defaults
+    image: ghcr.io/meeb/tubesync:${TUBESYNC_IMAGE_TAG:-latest}
+    container_name: tubesync
+    environment:
+      <<: *default-tz-puid-pgid
+    volumes:
+      - ${APPDATA_DIR}/tubesync:/config
+      - /mnt/media/youtube:/downloads
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.tubesync.rule=Host(`tubesync.${CLOUD_HOST}`)"
+      - "traefik.http.routers.tubesync.tls.certresolver=letsencrypt"
+      - "traefik.http.services.tubesync.loadbalancer.server.port=4848"
+      - "traefik.http.routers.tubesync.middlewares=authelia@file"
+
+  ytdl:
+    <<: *service-defaults
+    image: tzahi12345/youtubedl-material:${YTDL_IMAGE_TAG:-latest}
+    container_name: ytdl
+    environment:
+      ALLOW_CONFIG_MUTATIONS: "true"
+    volumes:
+      - ${APPDATA_DIR}/youtubedl/appdata:/app/appdata
+      - ${APPDATA_DIR}/youtubedl/users:/app/users
+      - /mnt/media/youtube/audio:/app/audio
+      - /mnt/media/youtube/video:/app/video
+      - /mnt/media/youtube/subscriptions:/app/subscriptions
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.ytdl.rule=Host(`ytdl.${CLOUD_HOST}`) || Host(`youtubedl.${CLOUD_HOST}`)"
+      - "traefik.http.routers.ytdl.tls.certresolver=letsencrypt"
+      - "traefik.http.services.ytdl.loadbalancer.server.port=17442"
+      - "traefik.http.routers.ytdl.middlewares=authelia@file"
+
+  # -------------------------------------------------------- INDEXERS --------------------------------------------------------
+
+  nzbhydra2:
+    <<: *service-defaults
+    image: lscr.io/linuxserver/nzbhydra2:${NZBHYDRA2_IMAGE_TAG:-latest}
+    container_name: nzbhydra2
+    mem_limit: 2G
+    environment:
+      <<: *default-tz-puid-pgid
+    volumes:
+      - ${APPDATA_DIR}/nzbhydra2:/config
+      - /mnt/media/downloads:/downloads
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.nzbhydra2.rule=Host(`nzbhydra2.${CLOUD_HOST}`)"
+      - "traefik.http.routers.nzbhydra2.tls.certresolver=letsencrypt"
+      - "traefik.http.services.nzbhydra2.loadbalancer.server.port=5076"
+      - "traefik.http.routers.nzbhydra2.middlewares=authelia@file"
+
+  radarr:
+    <<: *service-defaults
+    image: lscr.io/linuxserver/radarr:${RADARR_IMAGE_TAG:-latest}
+    container_name: radarr
+    environment:
+      <<: *default-tz-puid-pgid
+    volumes:
+      - ${APPDATA_DIR}/radarr:/config
+      - /mnt/media:/mnt/media
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.radarr.rule=Host(`radarr.${CLOUD_HOST}`)"
+      - "traefik.http.routers.radarr.tls.certresolver=letsencrypt"
+      - "traefik.http.services.radarr.loadbalancer.server.port=7878"
+      - "traefik.http.routers.radarr.middlewares=authelia@file"
+
+  sonarr:
+    <<: *service-defaults
+    image: lscr.io/linuxserver/sonarr:${SONARR_IMAGE_TAG:-latest}
+    container_name: sonarr
+    environment:
+      <<: *default-tz-puid-pgid
+    volumes:
+      - ${APPDATA_DIR}/sonarr:/config
+      - /mnt/media:/mnt/media
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.sonarr.rule=Host(`sonarr.${CLOUD_HOST}`)"
+      - "traefik.http.routers.sonarr.tls.certresolver=letsencrypt"
+      - "traefik.http.services.sonarr.loadbalancer.server.port=8989"
+      - "traefik.http.routers.sonarr.middlewares=authelia@file"
+
+  lidarr:
+    <<: *service-defaults
+    image: lscr.io/linuxserver/lidarr:${LIDARR_IMAGE_TAG:-latest}
+    container_name: lidarr
+    environment:
+      <<: *default-tz-puid-pgid
+    volumes:
+      - ${APPDATA_DIR}/lidarr:/config
+      - /mnt/media:/mnt/media
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.lidarr.rule=Host(`lidarr.${CLOUD_HOST}`)"
+      - "traefik.http.routers.lidarr.tls.certresolver=letsencrypt"
+      - "traefik.http.services.lidarr.loadbalancer.server.port=8686"
+      - "traefik.http.routers.lidarr.middlewares=authelia@file"
+
+  jackett:
+    <<: *service-defaults
+    image: lscr.io/linuxserver/jackett:${JACKETT_IMAGE_TAG:-latest}
+    container_name: jackett
+    environment:
+      <<: *default-tz-puid-pgid
+      AUTO_UPDATE: true
+    volumes:
+      - ${APPDATA_DIR}/jackett:/config
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.jackett.rule=Host(`jackett.${CLOUD_HOST}`)"
+      - "traefik.http.routers.jackett.tls.certresolver=letsencrypt"
+      - "traefik.http.services.jackett.loadbalancer.server.port=9117"
+      - "traefik.http.routers.jackett.middlewares=authelia@file"
+
+  autobrr:
+    <<: *service-defaults
+    image: ghcr.io/autobrr/autobrr:${AUTOBRR_IMAGE_TAG:-latest}
+    container_name: autobrr
+    environment:
+      <<: *default-tz-puid-pgid
+    volumes:
+      - ${APPDATA_DIR}/autobrr:/config
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.autobrr.rule=Host(`autobrr.${CLOUD_HOST}`)"
+      - "traefik.http.routers.autobrr.tls.certresolver=letsencrypt"
+      - "traefik.http.services.autobrr.loadbalancer.server.port=7474"
+      - "traefik.http.routers.autobrr.middlewares=authelia@file"
+
+  # -------------------------------------------------------- SERVICES --------------------------------------------------------
+
+  handbrake:
+    <<: *service-defaults
+    image: jlesage/handbrake:${HANDBRAKE_IMAGE_TAG:-latest}
+    container_name: handbrake
+    environment:
+      <<: *default-tz-puid-pgid
+    volumes:
+      - ${APPDATA_DIR}/handbrake:/config
+      - ${APPDATA_DIR}/handbrake/storage:/storage:ro
+      - ${APPDATA_DIR}/handbrake/output:/output
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.handbrake.rule=Host(`handbrake.${CLOUD_HOST}`)"
+      - "traefik.http.routers.handbrake.tls.certresolver=letsencrypt"
+      - "traefik.http.services.handbrake.loadbalancer.server.port=5800"
+      - "traefik.http.routers.handbrake.middlewares=authelia@file"
+
+  filestash:
+    <<: *service-defaults
+    image: machines/filestash:${FILESTASH_IMAGE_TAG:-latest}
+    container_name: filestash
+    environment:
+      - APPLICATION_URL=filestash.${CLOUD_HOST}
+    volumes:
+      - /mnt:/mnt/local
+      - ${APPDATA_DIR}/filestash:/app/data/state/config
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.filestash.rule=Host(`filestash.${CLOUD_HOST}`)"
+      - "traefik.http.routers.filestash.tls.certresolver=letsencrypt"
+      - "traefik.http.services.filestash.loadbalancer.server.port=8334"
+      - "traefik.http.routers.filestash.middlewares=authelia@file"
+
+  cloudcmd:
+    <<: *service-defaults
+    image: coderaiser/cloudcmd:${CLOUDCMD_IMAGE_TAG:-latest}
+    container_name: cloudcmd
+    environment:
+      <<: *default-tz-puid-pgid
+    volumes:
+      - /mnt:/mnt
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.cloudcmd.rule=Host(`cloudcmd.${CLOUD_HOST}`)"
+      - "traefik.http.routers.cloudcmd.tls.certresolver=letsencrypt"
+      - "traefik.http.services.cloudcmd.loadbalancer.server.port=8000"
+      - "traefik.http.routers.cloudcmd.middlewares=authelia@file"
+
+  # ------------------------------------------------- archivebox -------------------------------------------------
+
+  archivebox:
+    <<: *service-defaults
+    image: archivebox/archivebox:${ARCHIVEBOX_IMAGE_TAG:-latest}
+    container_name: archivebox
+    command: server --quick-init 0.0.0.0:8000
+    environment:
+      ALLOWED_HOSTS: archivebox.${CLOUD_HOST}
+      MEDIA_MAX_SIZE: 750m
+      SEARCH_BACKEND_ENGINE: sonic
+      SEARCH_BACKEND_HOST_NAME: sonic
+      SEARCH_BACKEND_PASSWORD: ${ARCHIVEBOX_SEARCH_BACKEND_PASSWORD}
+    volumes:
+      - ${APPDATA_DIR}/archivebox/data:/data
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.archivebox.rule=Host(`archivebox.${CLOUD_HOST}`)"
+      - "traefik.http.routers.archivebox.tls.certresolver=letsencrypt"
+      - "traefik.http.services.archivebox.loadbalancer.server.port=8000"
+      - "traefik.http.routers.archivebox.middlewares=authelia@file"
+
+  sonic:
+    <<: *service-defaults
+    image: valeriansaliou/sonic:${SONIC_IMAGE_TAG:-v1.3.0}
+    container_name: sonic
+    environment:
+      SEARCH_BACKEND_PASSWORD: ${ARCHIVEBOX_SEARCH_BACKEND_PASSWORD}
+    volumes:
+      - ${APPDATA_DIR}/archivebox/sonic.cfg:/etc/sonic.cfg:ro
+      - ${APPDATA_DIR}/archivebox/sonic:/var/lib/sonic/store
+
+  pywb:
+    <<: *service-defaults
+    image: webrecorder/pywb:${PYWB_IMAGE_TAG:-latest}
+    container_name: pywb
+    entrypoint: /bin/sh -c '(wb-manager init default || test $$? -eq 2) && wb-manager add default /archivebox/archive/*/warc/*.warc.gz; wayback;'
+    environment:
+      - INIT_COLLECTION=archivebox
+    volumes:
+      - ${APPDATA_DIR}/archivebox/data:/archivebox
+      - ${APPDATA_DIR}/archivebox/data/wayback:/webarchive
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.pywb.rule=Host(`pywb.${CLOUD_HOST}`)"
+      - "traefik.http.routers.pywb.tls.certresolver=letsencrypt"
+      - "traefik.http.services.pywb.loadbalancer.server.port=8080"
+      - "traefik.http.routers.pywb.middlewares=authelia@file"

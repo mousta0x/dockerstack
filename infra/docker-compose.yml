@@ -1,0 +1,440 @@
+---
+version: "3.9"
+
+networks:
+  default:
+    name: infra-net
+    external: true
+  media-net:
+    name: media-net
+    external: true
+
+volumes:
+  netdataconfig:
+  netdatalib:
+  netdatacache:
+
+x-env: &default-tz-puid-pgid
+  TZ: Etc/UTC
+  PUID: 1000
+  PGID: 1000
+
+x-defaults: &service-defaults
+  networks:
+    - default
+  security_opt:
+    - no-new-privileges:true
+  restart: unless-stopped
+
+services:
+  # -------------------------------------------------------- ELASTIC-STACK --------------------------------------------------------
+
+  # https://github.com/deviantony/docker-elk
+  # TODO: add the rest of the beats (osquery, auditd, etc...)
+
+  elasticsearch:
+    <<: *service-defaults
+    image: docker.elastic.co/elasticsearch/elasticsearch:${ELASTIC_VERSION}
+    container_name: elasticsearch
+    environment:
+      ES_JAVA_OPTS: -Xms1g -Xmx2g
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD}
+      # Use single node discovery in order to disable production mode and avoid bootstrap checks.
+      # see: https://www.elastic.co/guide/en/elasticsearch/reference/current/bootstrap-checks.html
+      discovery.type: single-node
+    volumes:
+      - ${ELK_DIR}/elasticsearch/config/elasticsearch.yml:/usr/share/elasticsearch/config/elasticsearch.yml:ro,z
+      - ${ELK_DIR}/elasticsearch/data:/usr/share/elasticsearch/data:z
+      - ${ELK_DIR}/elasticsearch/backups:/mnt/backups
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile: 65535
+    mem_limit: 2G
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.elasticsearch.rule=Host(`elasticsearch.${CLOUD_HOST}`)"
+      - "traefik.http.routers.elasticsearch.tls.certresolver=letsencrypt"
+      - "traefik.http.services.elasticsearch.loadbalancer.server.port=9200"
+
+  logstash:
+    <<: *service-defaults
+    image: docker.elastic.co/logstash/logstash:${ELASTIC_VERSION}
+    container_name: logstash
+    depends_on:
+      - elasticsearch
+    mem_limit: 2G
+    environment:
+      LS_JAVA_OPTS: -Xms512m -Xmx1g
+      LOGSTASH_INTERNAL_PASSWORD: ${LOGSTASH_INTERNAL_PASSWORD}
+    volumes:
+      # https://www.elastic.co/guide/en/logstash/current/dir-layout.html#docker-layout
+      - ${ELK_DIR}/logstash/config/logstash.yml:/usr/share/logstash/config/logstash.yml:ro,Z
+      - ${ELK_DIR}/logstash/pipeline:/usr/share/logstash/pipeline:ro,Z
+      - ${CERTS_DIR}/logstash:/certs:ro
+      - ${LOGS_DIR}:/log
+    ports:
+      - "5044:5044" #beats-input
+      - "50000:50000/tcp" #tcp-over-tls
+      - "55000:55000/tcp" #syslog-over-tls(tcp)?
+      #- "50000:50000/udp" #no-tls
+      #- "9600:9600"       #monitoring api
+
+  kibana:
+    <<: *service-defaults
+    image: docker.elastic.co/kibana/kibana:${ELASTIC_VERSION}
+    container_name: kibana
+    volumes:
+      - ${ELK_DIR}/kibana/kibana.yml:/usr/share/kibana/config/kibana.yml:ro,Z
+    environment:
+      KIBANA_SYSTEM_PASSWORD: ${KIBANA_SYSTEM_PASSWORD}
+      SERVER_NAME: kibana.${CLOUD_HOST}
+    depends_on:
+      - elasticsearch
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.kibana.rule=Host(`kibana.${CLOUD_HOST}`)"
+      - "traefik.http.routers.kibana.tls.certresolver=letsencrypt"
+      - "traefik.http.services.kibana.loadbalancer.server.port=5601"
+
+  filebeat:
+    <<: *service-defaults
+    image: docker.elastic.co/beats/filebeat:${ELASTIC_VERSION}
+    container_name: filebeat
+    hostname: optimus_bot
+    volumes:
+      - ${ELK_DIR}/filebeat/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - ${ELK_DIR}/filebeat/modules.d:/modules.d:ro
+      - ${ELK_DIR}/filebeat/inputs.d:/inputs.d:ro
+      - ${ELK_DIR}/filebeat/scripts:/scripts:ro
+      - ${CERTS_DIR}/optimus.hzcloud:/certs:ro
+      - ${LOGS_DIR}:/log
+    command: --strict.perms=false
+    ports:
+      - "54000:54000/udp" #syslog-over-udp
+    depends_on:
+      - elasticsearch
+
+  cerebro:
+    <<: *service-defaults
+    image: lmenezes/cerebro:${CEREBRO_IMAGE_TAG:-latest}
+    container_name: cerebro
+    depends_on:
+      - elasticsearch
+    mem_limit: 1G
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.cerebro.rule=Host(`cerebro.${CLOUD_HOST}`)"
+      - "traefik.http.routers.cerebro.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.cerebro.middlewares=authelia@file"
+      - "traefik.http.services.cerebro.loadbalancer.server.port=9000"
+
+  # -------------------------------------------------------- MONITORING -----------------------------------------------------------
+
+  influxdb:
+    <<: *service-defaults
+    image: influxdb:${INFLUXDB_IMAGE_TAG:-1.8}
+    container_name: influxdb
+    environment:
+      INFLUXDB_REPORTING_DISABLED: true
+      INFLUXDB_CONFIG_PATH: /etc/influxdb/influxdb.conf
+      INFLUXDB_DATA_CACHE_MAX_MEMORY_SIZE: 2G
+      INFLUXDB_DB: db0
+      INFLUXDB_ADMIN_USER: admin
+      INFLUXDB_USER: telegraf
+      INFLUXDB_ADMIN_PASSWORD: ${INFLUXDB_ADMIN_PASSWORD}
+      INFLUXDB_USER_PASSWORD: ${INFLUXDB_USER_PASSWORD}
+      INFLUXDB_HTTP_AUTH_ENABLED: true
+    volumes:
+      - ${APPDATA_DIR}/influxdb/data:/var/lib/influxdb
+      - ${APPDATA_DIR}/influxdb/config:/etc/influxdb
+    mem_limit: 3G
+    ports:
+      - 8086:8086
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.influxdb.rule=Host(`influxdb.${CLOUD_HOST}`)"
+      - "traefik.http.routers.influxdb.tls.certresolver=letsencrypt"
+      - "traefik.http.services.influxdb.loadbalancer.server.port=8086"
+
+  telegraf:
+    <<: *service-defaults
+    image: telegraf:${TELEGRAF_IMAGE_TAG:-latest}
+    container_name: telegraf
+    user: 1001:1001
+    environment:
+      HOST_ETC: /hostfs/etc
+      HOST_PROC: /hostfs/proc
+      HOST_SYS: /hostfs/sys
+      HOST_VAR: /hostfs/var
+      HOST_RUN: /hostfs/run
+      HOST_MOUNT_PREFIX: /hostfs
+    volumes:
+      - ${APPDATA_DIR}/telegraf:/etc/telegraf:ro
+      - /:/hostfs:ro
+      - /home/ubuntu/.docker/ca.pem:/docker/ca.pem
+      - /home/ubuntu/.docker/cert.pem:/docker/cert.pem
+      - /home/ubuntu/.docker/key.pem:/docker/key.pem
+    hostname: optimus
+    extra_hosts:
+      - "optimus.${BASE_DOMAIN}:192.168.1.10"
+
+  chronograf:
+    <<: *service-defaults
+    image: chronograf:${CHRONOGRAF_IMAGE_TAG:-latest}
+    container_name: chronograf
+    environment:
+      INFLUXDB_URL: http://influxdb:8086
+      INFLUXDB_USERNAME: admin
+      INFLUXDB_PASSWORD: ${INFLUXDB_ADMIN_PASSWORD}
+    volumes:
+      - ${APPDATA_DIR}/chronograf/data:/var/lib/chronograf
+      - ${APPDATA_DIR}/chronograf/config:/etc/chronograf
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.chronograf.rule=Host(`chronograf.${CLOUD_HOST}`)"
+      - "traefik.http.routers.chronograf.tls.certresolver=letsencrypt"
+      - "traefik.http.services.chronograf.loadbalancer.server.port=8888"
+      - "traefik.http.routers.chronograf.middlewares=authelia@file"
+
+  prometheus:
+    <<: *service-defaults
+    image: prom/prometheus:${PROMETHEUS_IMAGE_TAG:-latest}
+    container_name: prometheus
+    volumes:
+      - ${APPDATA_DIR}/prometheus/config:/etc/prometheus
+      - ${APPDATA_DIR}/prometheus/data:/prometheus
+      - /etc/localtime:/etc/localtime
+    environment:
+      - TZ=Etc/UTC
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.prometheus.rule=Host(`prometheus.${CLOUD_HOST}`)"
+      - "traefik.http.routers.prometheus.tls.certresolver=letsencrypt"
+      - "traefik.http.services.prometheus.loadbalancer.server.port=9090"
+      - "traefik.http.routers.prometheus.middlewares=authelia-basic@file"
+
+  grafana:
+    <<: *service-defaults
+    image: grafana/grafana-oss:${GRAFANA_IMAGE_TAG:-latest}
+    container_name: grafana
+    user: "472:0"
+    environment:
+      GF_INSTALL_PLUGINS: grafana-clock-panel,grafana-simple-json-datasource,grafana-worldmap-panel,grafana-piechart-panel,grafana-kubernetes-app,yesoreyeram-boomtheme-panel,ntop-ntopng-datasource
+      GF_ROOT_URL: https://grafana.${CLOUD_HOST}
+    volumes:
+      - ${APPDATA_DIR}/grafana/data:/var/lib/grafana
+      - ${APPDATA_DIR}/grafana/config:/etc/grafana
+    depends_on:
+      - influxdb
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.grafana.rule=Host(`grafana.${CLOUD_HOST}`)"
+      - "traefik.http.routers.grafana.tls.certresolver=letsencrypt"
+      - "traefik.http.services.grafana.loadbalancer.server.port=3000"
+      - "traefik.http.routers.grafana.middlewares=authelia@file"
+
+  goaccess-traefik-optimus:
+    <<: *service-defaults
+    image: allinurl/goaccess:${GOACCESS_IMAGE_TAG:-latest}
+    container_name: goaccess-traefik-optimus
+    command:
+      - "--log-file=/srv/log/traefik.access.log"
+      - "--output=/srv/reports/index.html"
+      - "--real-time-html"
+      - "--geoip-database=/srv/geoip/GeoLite2-City.mmdb"
+      - "--db-path=/srv/data"
+      - "--ws-url=wss://goaccess-optimus.${CLOUD_HOST}:443"
+      - '--log-format=%v: %h [%x] %m %s "%U" %b "%M" "%R" "%u" %D'
+      - "--datetime-format=%Y-%m-%dT%H:%M:%SZ"
+    volumes:
+      - ${APPDATA_DIR}/goaccess/optimus/db:/srv/data
+      - ${APPDATA_DIR}/maxmind-geoip/GeoLite2-City.mmdb:/srv/geoip/GeoLite2-City.mmdb:ro
+      - ${APPDATA_DIR}/traefik/nginx-worker/static/goaccess/optimus:/srv/reports
+      - ${LOGS_DIR}/tail/traefik.access.optimus.log:/srv/log/traefik.access.log:ro
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.goaccess.rule=Host(`traefik.${CLOUD_HOST}`) && PathPrefix(`/logs`)"
+      - "traefik.http.routers.goaccess.tls.certResolver=letsencrypt"
+      - "traefik.http.routers.goaccess.service=traefik-nginx-worker"
+      - "traefik.http.routers.goaccess.middlewares=authelia@file"
+      - "traefik.http.routers.goaccess-ws.rule=Host(`goaccess-optimus.${CLOUD_HOST}`)"
+      - "traefik.http.routers.goaccess-ws.tls.certResolver=letsencrypt"
+      - "traefik.http.services.goaccess-ws.loadbalancer.server.port=7890"
+
+  goaccess-traefik-home:
+    <<: *service-defaults
+    image: allinurl/goaccess:${GOACCESS_IMAGE_TAG:-latest}
+    container_name: goaccess-traefik-home
+    command:
+      - "--log-file=/srv/log/traefik.access.log"
+      - "--output=/srv/reports/index.html"
+      - "--real-time-html"
+      - "--geoip-database=/srv/geoip/GeoLite2-City.mmdb"
+      - "--db-path=/srv/data"
+      - "--ws-url=wss://goaccess-home.${CLOUD_HOST}:443"
+      - '--log-format=%v: %h [%x] %m %s "%U" %b "%M" "%R" "%u" %D'
+      - "--datetime-format=%Y-%m-%dT%H:%M:%SZ"
+    volumes:
+      - ${APPDATA_DIR}/goaccess/houston/db:/srv/data
+      - ${APPDATA_DIR}/maxmind-geoip/GeoLite2-City.mmdb:/srv/geoip/GeoLite2-City.mmdb:ro
+      - ${APPDATA_DIR}/traefik/nginx-worker/static/goaccess/home:/srv/reports
+      - ${LOGS_DIR}/tail/traefik.access.houston.log:/srv/log/traefik.access.log:ro
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.goaccess-home-ws.rule=Host(`goaccess-home.${CLOUD_HOST}`)"
+      - "traefik.http.routers.goaccess-home-ws.tls.certResolver=letsencrypt"
+      - "traefik.http.services.goaccess-home-ws.loadbalancer.server.port=7890"
+
+  netdata:
+    <<: *service-defaults
+    image: netdata/netdata:${NETDATA_IMAGE_TAG:-stable}
+    container_name: netdata
+    hostname: optimus
+    cap_add:
+      - SYS_PTRACE
+    #  - SYS_ADMIN
+    security_opt:
+      - apparmor:unconfined
+    mem_limit: 2G
+    environment:
+      - NETDATA_CLAIM_TOKEN=${NETDATA_CLAIM_TOKEN}
+      - NETDATA_CLAIM_URL=https://app.netdata.cloud
+      - NETDATA_CLAIM_ROOMS=
+    volumes:
+      - netdataconfig:/etc/netdata
+      - netdatalib:/var/lib/netdata
+      - netdatacache:/var/cache/netdata
+      #- /root/certs:/certs:ro
+      #- /etc/passwd:/host/etc/passwd:ro
+      #- /etc/group:/host/etc/group:ro
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /etc/os-release:/host/etc/os-release:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+  # ------------------------------------------------------
+
+  scrutiny-web:
+    <<: *service-defaults
+    image: ghcr.io/analogj/scrutiny:${SCRUTINY_IMAGE_TAG:-master-web}
+    container_name: scrutiny-web
+    volumes:
+      - ${APPDATA_DIR}/scrutiny:/opt/scrutiny/config
+    environment:
+      SCRUTINY_WEB_INFLUXDB_HOST: scrutiny-db
+    depends_on:
+      scrutiny-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 10s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.scrutiny.rule=Host(`scrutiny.${CLOUD_HOST}`)"
+      - "traefik.http.routers.scrutiny.tls.certresolver=letsencrypt"
+      - "traefik.http.services.scrutiny.loadbalancer.server.port=8080"
+      - "traefik.http.routers.scrutiny.middlewares=authelia@file"
+
+  scrutiny-db:
+    <<: *service-defaults
+    image: influxdb:2.2
+    container_name: scrutiny-db
+    #ports:
+    #  - 8387:8086 #admin-ui
+    volumes:
+      - ${APPDATA_DIR}/scrutiny/influxdb:/var/lib/influxdb2
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8086/health"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+
+  # ------------------------------------------------------
+
+  apprise:
+    <<: *service-defaults
+    image: caronc/apprise:${APPRISE_IMAGE_TAG:-latest}
+    container_name: apprise
+    user: "www-data:www-data"
+    networks:
+      - default
+      - media-net
+    volumes:
+      - ${APPDATA_DIR}/apprise:/config:rw
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=infra-net"
+      - "traefik.http.routers.apprise.rule=Host(`apprise.${CLOUD_HOST}`)"
+      - "traefik.http.routers.apprise.tls.certresolver=letsencrypt"
+      - "traefik.http.services.apprise.loadbalancer.server.port=8000"
+      - "traefik.http.routers.apprise.middlewares=authelia-basic@file"
+
+  ntfy:
+    <<: *service-defaults
+    image: binwiederhier/ntfy:${NTFY_IMAGE_TAG:-latest}
+    container_name: ntfy
+    user: 1000:1000
+    command:
+      - serve
+    environment:
+      <<: *default-tz-puid-pgid
+    volumes:
+      - /mnt/ephemeral/cache/ntfy:/var/cache/ntfy
+      - ${APPDATA_DIR}/ntfy:/etc/ntfy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.ntfy.rule=Host(`ntfy.${CLOUD_HOST}`)"
+      - "traefik.http.routers.ntfy.tls.certresolver=letsencrypt"
+      - "traefik.http.services.ntfy.loadbalancer.server.port=80"
+      - "traefik.http.routers.ntfy.middlewares=authelia@file"
+
+  uptime-kuma:
+    <<: *service-defaults
+    image: louislam/uptime-kuma:${UPTIME_KUMA_IMAGE_TAG:-latest}
+    container_name: uptime-kuma
+    volumes:
+      - ${APPDATA_DIR}/uptime-kuma:/app/data
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.uptime-kuma.rule=Host(`uptime.${CLOUD_HOST}`)"
+      - "traefik.http.routers.uptime-kuma.tls.certresolver=letsencrypt"
+      - "traefik.http.services.uptime-kuma.loadbalancer.server.port=3001"
+
+  healthchecks:
+    <<: *service-defaults
+    image: lscr.io/linuxserver/healthchecks:${HEALTHCHECKS_IMAGE_TAG:-latest}
+    container_name: healthchecks
+    environment:
+      PUID: 1000
+      PGID: 1000
+      SITE_ROOT: https://healthchecks.${CLOUD_HOST}
+      SITE_NAME: Cloud HealthChecks
+      DEFAULT_FROM_EMAIL: healthchecks@${BASE_DOMAIN}
+      EMAIL_HOST: mx1.${BASE_DOMAIN}
+      EMAIL_PORT: 587
+      EMAIL_HOST_USER: notifications@${BASE_DOMAIN}
+      EMAIL_HOST_PASSWORD: ${HEALTHCHECKS_EMAIL_HOST_PASSWORD}
+      EMAIL_USE_TLS: "True"
+      SUPERUSER_EMAIL: ${HEALTHCHECKS_SUPERUSER_EMAIL}
+      SUPERUSER_PASSWORD: ${HEALTHCHECKS_SUPERUSER_PASSWORD}
+      REGENERATE_SETTINGS: "False" #/False #optional
+      SECRET_KEY: ${HEALTHCHECKS_SECRET_KEY}
+      APPRISE_ENABLED: "True"
+      DOCKER_MODS: linuxserver/mods:universal-apprise
+      DEBUG: "False"
+      REGISTRATION_OPEN: "False"
+    volumes:
+      - ${APPDATA_DIR}/healthchecks:/config
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.healthchecks.rule=Host(`healthchecks.${CLOUD_HOST}`)"
+      - "traefik.http.routers.healthchecks.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.healthchecks.service=healthchecks"
+      - "traefik.http.services.healthchecks.loadbalancer.server.port=8000"
+
+# -----------------------------------------------------------------------------------------------------------------------------
