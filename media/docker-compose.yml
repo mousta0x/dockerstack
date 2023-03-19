@@ -53,6 +53,7 @@ services:
       test: /bin/bash -c 'ls "${PMS_ROOT}/Media/.mount" "${PMS_ROOT}/Metadata/.mount" /mnt/media/.rclonemount &>/dev/null && true || false'
     volumes:
       - ${APPDATA_DIR}/plex:${PMS_ROOT}
+      - ${APPDATA_DIR}/plex/scripts/init-plex-chown:/etc/s6-overlay/s6-rc.d/init-plex-chown
       - ${REMOTE_APPDATA_DIR}/plex/Media:${PMS_ROOT}/Media
       - ${REMOTE_APPDATA_DIR}/plex/Metadata:${PMS_ROOT}/Metadata
       - /mnt/ephemeral/cache/plex:${PMS_ROOT}/Cache
