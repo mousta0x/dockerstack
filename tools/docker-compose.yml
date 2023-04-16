@@ -446,7 +446,7 @@ services:
 
   expanse:
     <<: *service-defaults
-    image: registry.${CLOUD_HOST}/expanse:${EXPANSE_IMAGE_TAG:-22.09}
+    image: registry.${CLOUD_HOST}/expanse:${EXPANSE_IMAGE_TAG:-23.04}
     container_name: expanse
     depends_on:
       - expanse-db
