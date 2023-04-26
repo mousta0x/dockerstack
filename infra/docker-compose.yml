@@ -149,7 +149,7 @@ services:
     volumes:
       - ${APPDATA_DIR}/influxdb/data:/var/lib/influxdb
       - ${APPDATA_DIR}/influxdb/config:/etc/influxdb
-    mem_limit: 5G
+    mem_limit: 8G
     ports:
       - 8086:8086
     labels:
