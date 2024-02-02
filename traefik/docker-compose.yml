@@ -47,6 +47,10 @@ x-defaults: &service-defaults
   security_opt:
     - no-new-privileges:true
   restart: unless-stopped
+  logging:
+    driver: "json-file"
+    options:
+      max-size: "1m"
 
 x-net: &traefik-networks
   media-net:
@@ -144,10 +148,6 @@ services:
       - "traefik.http.routers.authelia.tls.certresolver=letsencrypt"
       - "traefik.http.routers.authelia.tls.domains[0].main=${CLOUD_HOST}"
       - "traefik.http.routers.authelia.tls.domains[0].sans=*.${CLOUD_HOST}"
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "1m"
 
   authelia-redis:
     <<: *service-defaults

@@ -12,6 +12,10 @@ x-defaults: &service-defaults
   security_opt:
     - no-new-privileges:true
   restart: unless-stopped
+  logging:
+    driver: "json-file"
+    options:
+      max-size: "1m"
 
 x-env: &default-tz-puid-pgid
   TZ: Etc/UTC
@@ -424,10 +428,6 @@ services:
       POSTGRES_DB: wiki
       POSTGRES_USER: wikijs
       POSTGRES_PASSWORD: ${WIKIJS_DB_PASS}
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "1m"
     volumes:
       - ${APPDATA_DIR}/wikijs:/var/lib/postgresql/data
 
