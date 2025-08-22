@@ -118,6 +118,7 @@ services:
       AUTH_SERVER_PSEUDO_KEY_PARAMS_KEY: ${SN_AUTH_SERVER_PSEUDO_KEY_PARAMS_KEY}
       AUTH_SERVER_ENCRYPTION_SERVER_KEY: ${SN_AUTH_SERVER_ENCRYPTION_SERVER_KEY}
       REVISIONS_SERVER_PORT: 3005
+      COOKIE_DOMAIN: standardnotes-api.${CLOUD_HOST}
     volumes:
       - ${APPDATA_DIR}/standardnotes/uploads:/opt/server/packages/files/dist/uploads
       - ${APPDATA_DIR}/standardnotes/logs:/var/lib/server/logs
