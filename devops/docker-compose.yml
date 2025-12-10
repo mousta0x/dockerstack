@@ -67,23 +67,23 @@ services:
     volumes:
       - ${APPDATA_DIR}/gitea-db:/var/lib/mysql
 
-  jenkins:
-    <<: *service-defaults
-    image: registry.${CLOUD_HOST}/jenkins-blueocean:${JENKINS_IMAGE_TAG:-2.366}
-    container_name: jenkins
-    mem_limit: 3G
-    environment:
-      DOCKER_HOST: tcp://vulcan.hzcloud:2380
-      DOCKER_CERT_PATH: /certs/client
-      DOCKER_TLS_VERIFY: 1
-    volumes:
-      - ${CERTS_DIR}/vulcan-dind-certs:/certs/client:ro
-      - ${APPDATA_DIR}/jenkins:/var/jenkins_home
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.jenkins.rule=Host(`jenkins.${CLOUD_HOST}`)"
-      - "traefik.http.routers.jenkins.tls.certresolver=letsencrypt"
-      - "traefik.http.services.jenkins.loadbalancer.server.port=8080"
+  # jenkins:
+  #   <<: *service-defaults
+  #   image: registry.${CLOUD_HOST}/jenkins-blueocean:${JENKINS_IMAGE_TAG:-2.366}
+  #   container_name: jenkins
+  #   mem_limit: 3G
+  #   environment:
+  #     DOCKER_HOST: tcp://vulcan.hzcloud:2380
+  #     DOCKER_CERT_PATH: /certs/client
+  #     DOCKER_TLS_VERIFY: 1
+  #   volumes:
+  #     - ${CERTS_DIR}/vulcan-dind-certs:/certs/client:ro
+  #     - ${APPDATA_DIR}/jenkins:/var/jenkins_home
+  #   labels:
+  #     - "traefik.enable=true"
+  #     - "traefik.http.routers.jenkins.rule=Host(`jenkins.${CLOUD_HOST}`)"
+  #     - "traefik.http.routers.jenkins.tls.certresolver=letsencrypt"
+  #     - "traefik.http.services.jenkins.loadbalancer.server.port=8080"
   
   drone:
     <<: *service-defaults
