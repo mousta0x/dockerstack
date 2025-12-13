@@ -357,7 +357,7 @@ services:
       retries: 3
     volumes:
       - ${CERTS_DIR}/minio:/certs:ro
-      - /mnt/asgard-root/minio:/data
+      - ${MINIO_DATA_DIR}:/data
     networks:
       - default
       - infra-net
